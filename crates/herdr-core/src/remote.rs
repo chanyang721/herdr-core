@@ -22,8 +22,12 @@ type Sink = (Arc<Conn>, u32);
 /// A pending reply, its stream sink and whether resize support is required.
 type Waiting = (oneshot::Sender<Value>, Option<(Sink, bool)>);
 
+mod localize;
 #[cfg(test)]
 mod tests;
+
+pub use localize::localize;
+use localize::{localize_in, map_addresses};
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|p| p.into_inner())
@@ -1118,42 +1122,4 @@ pub async fn forward_to(core: &Core, to: &To, method: &str, params: Value) -> Re
             Ok(if method.starts_with("doc.") { reply } else { localize(core, name, &[calls_me.as_str()], reply) })
         }
     }
-}
-
-/// Addresses from the core called `name`: its `t7` is `name/t7` here; ours
-/// (by our id, our name, or an `alias` it calls us) are bare again.
-pub fn localize(core: &Core, name: &str, aliases: &[&str], v: Value) -> Value {
-    localize_in(core, &core.lock(), name, aliases, v)
-}
-
-fn map_addresses(v: &mut Value, map: &dyn Fn(&str) -> String) {
-    match v {
-        Value::Object(o) => {
-            for (k, v) in o.iter_mut() {
-                match v {
-                    Value::String(s) if ["address", "parent", "terminal", "from", "removed"].contains(&k.as_str()) => {
-                        *s = map(s)
-                    }
-                    _ => map_addresses(v, map),
-                }
-            }
-        }
-        Value::Array(a) => a.iter_mut().for_each(|v| map_addresses(v, map)),
-        _ => {}
-    }
-}
-
-fn localize_in(core: &Core, st: &State, name: &str, aliases: &[&str], mut v: Value) -> Value {
-    let map = |s: &str| match s.split_once('/') {
-        None => format!("{name}/{s}"),
-        Some((prefix, rest)) if prefix == core.info.id || prefix == core.info.name || aliases.contains(&prefix) => {
-            rest.to_string()
-        }
-        Some((prefix, rest)) => match st.machines.iter().find(|m| m.id == prefix) {
-            Some(m) => format!("{}/{rest}", m.name),
-            None => s.to_string(),
-        },
-    };
-    map_addresses(&mut v, &map);
-    v
 }
