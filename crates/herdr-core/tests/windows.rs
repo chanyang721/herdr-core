@@ -602,6 +602,7 @@ Start-Sleep 60
     assert_eq!(sent["wait"]["status"], "done", "{sent}");
     let (line, at) = rx.recv_timeout(Duration::from_secs(5)).expect("a message_sent event");
     let _ = events.kill();
+    let _ = events.wait();
     let e: Value = serde_json::from_str(&line).unwrap();
     let data = &e["params"]["data"];
     assert_eq!((data["target"].as_str(), data["started"].as_bool()), (Some(t.as_str()), Some(true)), "{line}");
