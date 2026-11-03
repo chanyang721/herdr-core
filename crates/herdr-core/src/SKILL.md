@@ -54,6 +54,14 @@ inspection, even after the core restarts. To recover: `hc read <t>`; resolve rea
 `hc keys <t> down enter`), then send the task. Do not blindly resend after a
 failed send: it may still have arrived; read first.
 
+## Observe sends
+
+`hc events --json` includes `message_sent` after a successful send, before
+any `--wait` finishes. Its data contains `source` (null for a non-terminal
+caller), `target`, `at` (epoch milliseconds), and the send result's `started`.
+It contains no message text. This observes a send, not a read receipt or a
+promise that the recipient processed it; refused sends emit no such event.
+
 ## Talk, wait, and collect results
 
 ```sh
