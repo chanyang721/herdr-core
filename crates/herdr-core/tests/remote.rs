@@ -338,19 +338,27 @@ fn events_cover_terminals_on_other_machines() {
 fn a_send_there_is_heard_here_with_addresses_as_seen_from_here() {
     let (rohan, s) = with_rohan();
     let sender = run(&s, &["sh", "-c", "sleep 100"]);
+    // Labels named like the event's fields are data, never addresses.
+    let kept = |l: &Value| l["source"].as_str() == Some("github") && l["target"].as_str() == Some("production");
     let t = run(
         &s,
         &[
             "--on",
             "rohan",
+            "--label",
+            "source=github",
+            "--label",
+            "target=production",
             "sh",
             "-c",
             &script(&s, "r state=idle; while read -r l; do r state=working; r state=done; done"),
         ],
     );
     wait_until("idle there", || get(&s, &t)["status"]["state"] == "idle");
+    assert!(kept(&get(&s, &t)["labels"]), "{}", get(&s, &t));
     let (mut here, mut there) = (s.connect(), rohan.connect());
-    here.call(1, "events.subscribe", json!({}));
+    let sub = here.call(1, "events.subscribe", json!({"labels": {"source": "github"}}));
+    assert!(kept(&sub["result"]["terminals"][0]["labels"]), "{sub}");
     there.call(1, "events.subscribe", json!({}));
 
     let sent =
@@ -359,13 +367,22 @@ fn a_send_there_is_heard_here_with_addresses_as_seen_from_here() {
     let e = next_params(&mut here, |e| e["type"] == "message_sent");
     assert_eq!((e["terminal"].as_str(), e["data"]["target"].as_str()), (Some(t.as_str()), Some(t.as_str())), "{e}");
     assert_eq!((e["data"]["source"].as_str(), e["data"]["started"].as_bool()), (Some(sender.as_str()), Some(true)));
-    // Rohan says it once, in its own words: the target is its own, the sender ours.
+    // Rohan says it in its own words: the target is its own, the sender ours.
     let e = next_params(&mut there, |e| e["type"] == "message_sent");
     let local = t.strip_prefix("rohan/").unwrap();
     assert_eq!(e["data"]["target"].as_str(), Some(local), "{e}");
     // Both cores have this host's name, so Rohan calls its peer by id.
     let peer = s.json(&["server", "status"])["core"]["id"].as_str().unwrap().to_string();
     assert_eq!(e["data"]["source"], format!("{peer}/{sender}"), "{e}");
+
+    // A sender outside any terminal is nobody, on both machines.
+    let sent =
+        s.connect().call(2, "terminal.send", json!({"terminal": t, "text": "hi", "caller": "ppid:1", "wait": true}));
+    assert_eq!(sent["result"]["wait"]["status"], "done", "{sent}");
+    for conn in [&mut here, &mut there] {
+        let e = next_params(conn, |e| e["type"] == "message_sent");
+        assert!(e["data"]["source"].is_null(), "{e}");
+    }
 }
 
 #[test]

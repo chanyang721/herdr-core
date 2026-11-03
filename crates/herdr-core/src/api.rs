@@ -467,8 +467,10 @@ async fn terminal_send(core: Ctx<'_>, p: SendParams) -> Result<SendResult, RpcEr
             .map(|t| t.address.clone());
         let from = from.or_else(|| p.caller.clone().filter(|c| c.contains('/'))); // a terminal on another machine
         // Who messaged whom, never what: it went in, so it is told before any wait ends.
+        // A caller from another machine is a terminal only if it ends in one (not `ppid:N`).
+        let source = from.clone().filter(|f| f.rsplit('/').next().and_then(crate::terminals::parse_id).is_some());
         let data =
-            json!({"source": from, "target": crate::terminals::address(id), "at": now_ms(), "started": sent.started});
+            json!({"source": source, "target": crate::terminals::address(id), "at": now_ms(), "started": sent.started});
         if sent.status.as_deref() == Some("working") {
             st.messages.insert(id, from);
         }
