@@ -84,7 +84,7 @@ A guarded core with live terminals refuses `server.stop`; close authorized
 batches first. This prevents holder goodbye from bypassing policy.
 
 Closing targets are retained through ACK despite `--rm` and prune. Spawn is
-temporarily fenced globally during committed closure. Unknown outcomes after
+fenced within the closing subtree during committed closure. Unknown outcomes after
 commitment retain a durable operation, fence and terminal evidence for explicit
 reconciliation; there is no automatic retry or fallback. Naturally finished
 records without a verified native close receipt are retained rather than removed.
@@ -105,13 +105,23 @@ A proven pre-signal cancellation instead returns
 `{ok:false,operation_id,state:"cancelled",no_signal:true,expected:exact_original_expected}`.
 It has no `terminated` field and permits only retry with the model preserved.
 Native preflight refusals and verified helper denied/exit1 or cancelled/exit1
-are recorded separately from unknown outcomes. Existing uncertain operations
+are recorded separately from unknown outcomes. Signalled uncertain operations
 cannot be overwritten with a cancellation. `close_retry_safe` errors identify
 definite refusal; clients can obtain the exact certificate through reconciliation.
 
+An exact original operation with durable `signalled:false` can also be explicitly
+settled through reconciliation after helper spawn failure, malformed output,
+READY timeout or a lost cancellation ACK. Core persists cancellation before
+releasing its fence. The proof is its native signal-intent journal, rather than
+the timeout itself. A signalled operation never takes this path, including after
+restart. A new audit's definite pre-READY denial is settled immediately and returns
+`close_retry_safe`; unknown outcomes retain the original operation for recovery.
+An unresolved operation blocks overlapping targets, not unrelated terminal closes
+or kept recovery. A separately kept pane remains a protected subtree boundary.
+
 Read-only `terminal.close_snapshot {roots}` (CLI `close-snapshot <terminal>`)
 returns `core_id`, `roots`, `expected`, `targets` with `input_generation`,
-`program_started_ms`, `turn`, `status`, `native_state` and `observed_exit`, plus
+`program_started_ms`, `turn`, `status`, `non_agent_history`, `native_state` and `observed_exit`, plus
 matching operation metadata. It grants no close permission.
 
 An unknown operation ID on explicit reconciliation can create an audit-only
@@ -122,6 +132,25 @@ helper receives `action:"audit",context.mode:"reconcile"` and authoritative
 its pre-exit provider SID/input-generation binding and current report, review,
 acceptance and learning evidence. Missing bindings or unknown records are denied
 and retained. No automatic cleanup scheduler is added.
+
+Ordinary shell exits have a separate positive provenance: only a newly launched
+interactive shell with known arguments starts with `non_agent_history:true`.
+Opaque `-c`, `-Command`, script/template and historical records default false.
+Any OSC task report, arbitrary input, kept program replacement or restart
+observation gap permanently invalidates it for that identity. Only an empty input
+history or a bare `exit` command prefix retains this narrow proof. Core records
+the proof with its actual Exit witness. The external authorizer independently
+re-reads that exact snapshot and rejects any registered attempt or agent binding
+before allowing a shell-only, signal-free audit without a provider SID.
+
+If signals were sent but no actual Exit was observed, the target remains held.
+Snapshot shows `native_state:"unknown"`, `observed_exit:false` and operation
+`outcome:"exit_unobserved"`. No `terminated` receipt or human flag override is
+fabricated. Unrelated work and kept recovery can continue. A lost kept terminal
+with no PID cannot be closed until a fresh program identity is available; that
+new identity requires a fresh plan. Exit witnesses and original operations are
+retained for audit/recovery rather than silently pruned; this candidate adds no
+evidence garbage collector.
 
 Guarded orphan adoption, late spawn cleanup and scope sweeps retain unverifiable
 processes instead of sending an unguarded kill. A core with an unverified orphan

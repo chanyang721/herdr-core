@@ -12,6 +12,26 @@ use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 const LIMIT: usize = 256 * 1024;
 static OPERATION: AtomicU64 = AtomicU64::new(1);
 
+impl State {
+    /// Fences only the unresolved target's subtree. An independently kept pane
+    /// is a protected boundary, just as it is in native close expansion.
+    pub(crate) fn close_blocks(&self, address: &str) -> bool {
+        let mut current = Some(address);
+        for _ in 0..=self.reg.terminals.len() {
+            let Some(id) = current.and_then(crate::terminals::parse_id) else { return false };
+            if self.close_inflight.contains(&id) {
+                return true;
+            }
+            let Some(t) = self.reg.terminals.get(&id) else { return false };
+            if t.keep && t.labels.contains_key("herdr.space") {
+                return false;
+            }
+            current = t.parent.as_deref();
+        }
+        true // a malformed parent cycle is not permission to spawn
+    }
+}
+
 pub(crate) fn denied(message: impl Into<String>) -> RpcError {
     RpcError::new("close_denied", message, "complete the external close policy; no single-kill fallback")
 }
@@ -39,6 +59,7 @@ fn targets(st: &State) -> Result<Vec<Target>, RpcError> {
                     t.status.as_ref().map_or("unknown", |s| &s.state).into()
                 },
                 protected: t.keep && t.labels.contains_key("herdr.space"),
+                non_agent_history: t.non_agent_history && t.turn == 0 && !t.reported,
             })
         })
         .collect()
@@ -100,7 +121,7 @@ impl Lease {
                 json!({"address":t.identity.address,"pid":t.identity.pid,
             "created_ms":t.identity.created_ms,"machine_id":core.info.id,"input_generation":t.input_generation,
             "program_started_ms":t.program_started_ms,"turn":t.turn,"state":t.state,"parent":t.parent,
-            "observed_exit":phase != Phase::Close})
+            "observed_exit":phase != Phase::Close,"non_agent_history":t.non_agent_history})
             })
             .collect();
         lease
@@ -296,10 +317,15 @@ impl Core {
             if st.reg.close_operations.contains_key(&operation) {
                 return Err(denied("operation already exists; reconcile the original operation"));
             }
-            if st.reg.close_operations.values().any(|op| !op.acknowledged && !op.cancelled) {
-                return Err(denied("an earlier close outcome is unresolved"));
+            let selected = plan::closure(&roots, &targets(&st)?).map_err(retry_safe)?;
+            if st.reg.close_operations.values().any(|op| {
+                !op.acknowledged
+                    && !op.cancelled
+                    && op.expected.iter().any(|old| selected.iter().any(|t| t.identity.address == old.address))
+            }) {
+                return Err(denied("a target has an unresolved close operation; reconcile it first"));
             }
-            (plan::closure(&roots, &targets(&st)?).map_err(retry_safe)?, st.policy_generation)
+            (selected, st.policy_generation)
         };
         let expected = expected.unwrap_or_else(|| before.iter().map(|t| t.identity.clone()).collect());
         plan::plan(&roots, &expected, &before).map_err(retry_safe)?;
@@ -457,6 +483,39 @@ impl Core {
         Ok(())
     }
 
+    async fn settle_no_signal(&self, operation: &str) -> Result<Value, RpcError> {
+        let record = {
+            let mut st = self.lock();
+            let record =
+                st.reg.close_operations.get_mut(operation).ok_or_else(|| denied("unknown native operation"))?;
+            if record.signalled || record.acknowledged {
+                return Err(denied("a signalled or acknowledged operation is not a no-signal cancellation"));
+            }
+            record.cancelled = true;
+            let record = record.clone();
+            self.save(&st);
+            record
+        };
+        // The journal, rather than a timeout or helper error, proves this core
+        // never entered its durable signal-intent stage for this operation.
+        self.flush_close_saved().await?;
+        let mut st = self.lock();
+        for target in &record.expected {
+            let id = crate::terminals::parse_id(&target.address).ok_or_else(|| denied("invalid original identity"))?;
+            let held_elsewhere = st.reg.close_operations.iter().any(|(key, op)| {
+                key != operation
+                    && !op.acknowledged
+                    && !op.cancelled
+                    && op.expected.iter().any(|t| t.address == target.address)
+            });
+            if !held_elsewhere {
+                st.close_inflight.remove(&id);
+                st.killing.remove(&id);
+            }
+        }
+        Ok(json!({"ok":false,"operation_id":operation,"state":"cancelled","no_signal":true,"expected":record.expected}))
+    }
+
     pub(crate) async fn close_reconcile(
         &self,
         operation: String,
@@ -468,10 +527,10 @@ impl Core {
         if !valid_operation(&operation) {
             return Err(denied("invalid operation ID"));
         }
-        let record = {
+        let (record, existing) = {
             let mut st = self.lock();
             if let Some(record) = st.reg.close_operations.get(&operation) {
-                record.clone()
+                (record.clone(), true)
             } else {
                 // A new audit operation has no signal authority. Every selected
                 // member must already have a durable native actual Exit witness.
@@ -482,6 +541,13 @@ impl Core {
                     }
                 }
                 let selected = plan::plan(&roots, &expected, &all).map_err(denied)?;
+                if st.reg.close_operations.values().any(|op| {
+                    !op.acknowledged
+                        && !op.cancelled
+                        && op.expected.iter().any(|t| expected.iter().any(|e| e.address == t.address))
+                }) {
+                    return Err(denied("audit overlaps an unresolved original operation"));
+                }
                 let record = plan::CloseOperation {
                     roots: roots.clone(),
                     expected: expected.clone(),
@@ -497,17 +563,15 @@ impl Core {
                 st.close_inflight.extend(ids);
                 st.reg.close_operations.insert(operation.clone(), record.clone());
                 self.save(&st);
-                record
+                (record, false)
             }
         };
         self.flush_close_saved().await?;
         if !same_set(&roots, &record.roots) || !same_set(&expected, &record.expected) {
             return Err(denied("reconcile does not match the original complete operation"));
         }
-        if record.cancelled && !record.signalled {
-            return Ok(
-                json!({"ok":false,"operation_id":operation,"state":"cancelled","no_signal":true,"expected":record.expected}),
-            );
+        if existing && !record.signalled && !record.acknowledged {
+            return self.settle_no_signal(&operation).await;
         }
         let generation = {
             let st = self.lock();
@@ -516,7 +580,7 @@ impl Core {
         };
         let mut context = context.as_object().cloned().unwrap_or_default();
         context.insert("mode".into(), json!("reconcile"));
-        let mut lease = Lease::open(
+        let opened = Lease::open(
             self,
             operation.clone(),
             &record.roots,
@@ -525,7 +589,15 @@ impl Core {
             Value::Object(context),
             if record.audit_only { Phase::Audit } else { Phase::Reconcile },
         )
-        .await?;
+        .await;
+        let mut lease = match opened {
+            Ok(lease) => lease,
+            Err(error) if record.audit_only && error.kind == "close_retry_safe" => {
+                self.settle_no_signal(&operation).await?;
+                return Err(error);
+            }
+            Err(error) => return Err(error),
+        };
         let valid = {
             let st = self.lock();
             st.policy_generation == generation && self.verify_ended(&st, &record).is_ok()
@@ -551,6 +623,15 @@ impl Core {
                 all.push(witness.target.clone());
             }
         }
+        // Preserve an explicitly unknown post-signal outcome as inspectable
+        // native history. Missing Exit evidence grants no audit authority.
+        for op in st.reg.close_operations.values().filter(|op| op.signalled && !op.acknowledged) {
+            for target in &op.targets {
+                if !all.iter().any(|t| t.identity.address == target.identity.address) {
+                    all.push(target.clone());
+                }
+            }
+        }
         let selected = plan::closure(roots, &all).map_err(denied)?;
         let expected: Vec<_> = selected.iter().map(|t| t.identity.clone()).collect();
         let snapshots: Vec<_> = selected
@@ -566,11 +647,37 @@ impl Core {
                 json!({"address":t.identity.address,"pid":t.identity.pid,"created_ms":t.identity.created_ms,
                 "input_generation":t.input_generation,"program_started_ms":t.program_started_ms,
                 "turn":t.turn,"status":t.state,
-                "native_state":if live {"live"} else {"finished"},"observed_exit":observed})
+                "non_agent_history":t.non_agent_history,
+                "native_state":if live {"live"} else if observed {"finished"} else {"unknown"},"observed_exit":observed})
             })
             .collect();
-        let operations: Vec<_> = st.reg.close_operations.iter().filter(|(_, op)| op.expected.iter().any(|t| expected.contains(t)))
-            .map(|(id, op)| json!({"operation_id":id,"roots":op.roots,"expected":op.expected,"acknowledged":op.acknowledged,"signalled":op.signalled,"cancelled":op.cancelled})).collect();
+        let operations: Vec<_> = st
+            .reg
+            .close_operations
+            .iter()
+            .filter(|(_, op)| op.expected.iter().any(|t| expected.contains(t)))
+            .map(|(id, op)| {
+                let outcome = if op.cancelled {
+                    "cancelled"
+                } else if op.acknowledged {
+                    "closed"
+                } else if !op.signalled {
+                    "no_signal_pending"
+                } else if self.verify_ended(&st, op).is_ok() {
+                    "awaiting_audit"
+                } else if op.expected.iter().any(|t| {
+                    crate::terminals::parse_id(&t.address)
+                        .and_then(|id| st.reg.terminals.get(&id))
+                        .is_none_or(|t| !t.is_live())
+                }) {
+                    "exit_unobserved"
+                } else {
+                    "pending"
+                };
+                json!({"operation_id":id,"roots":op.roots,"expected":op.expected,"acknowledged":op.acknowledged,
+                    "signalled":op.signalled,"cancelled":op.cancelled,"outcome":outcome})
+            })
+            .collect();
         Ok(
             json!({"core_id":self.info.id,"roots":roots,"expected":expected,"targets":snapshots,"operations":operations}),
         )

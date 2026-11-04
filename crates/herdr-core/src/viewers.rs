@@ -266,6 +266,7 @@ impl Core {
             if st.note_input(id).is_err() {
                 return;
             }
+            st.reg.terminals.get_mut(&id).expect("input target").observe_shell_input(bytes);
             self.save_soon();
             if let Some(link) = st.link(id) {
                 link.input(id, &now);

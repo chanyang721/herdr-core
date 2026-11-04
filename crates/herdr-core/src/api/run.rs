@@ -82,9 +82,6 @@ pub(crate) fn tail(text: String, id: u32) -> String {
 
 /// A stopping core starts nothing: whatever it started now would outlive the stop.
 pub(crate) fn not_stopping(st: &crate::runtime::State) -> Result<(), RpcError> {
-    if !st.close_inflight.is_empty() {
-        return Err(crate::close_guard::denied("close transaction fences new spawns"));
-    }
     match st.stopping {
         true => Err(RpcError::new("unavailable", "the core is stopping", "run it again once it has stopped")),
         false => Ok(()),
@@ -136,6 +133,9 @@ pub(super) async fn start(
     let (id, rx) = {
         let mut st = core.lock();
         not_stopping(&st)?;
+        if parent.as_deref().is_some_and(|p| st.close_blocks(p)) {
+            return Err(crate::close_guard::denied("the closing subtree fences new descendants"));
+        }
         let instance = st
             .current()
             .ok_or_else(|| {

@@ -242,6 +242,11 @@ paths start at your current folder. Prefer explicit paths for remote work.
   It sends no signals. A `no_signal:true` cancellation certificate permits retry
   with the model preserved; unknown or partial outcomes remain held. There is
   no single-kill fallback. See `docs/close-guard-protocol.md` for the protocol.
+  An exact original operation whose native journal proves `signalled:false` can
+  be reconciled to a cancellation even after a pre-READY timeout. A post-signal
+  `exit_unobserved` outcome remains held; it grants no cleanup permission.
+  Ordinary natural shell exits can be audited only with a native positive
+  shell-only history and actual Exit witness, independently checked by the helper.
 - `hc update` also restarts an older running core when the installed binary
   is already current. JSON reports `restarted: true`; terminals keep running.
   Managed installs must be updated with their package manager instead, and

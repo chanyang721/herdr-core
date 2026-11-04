@@ -161,6 +161,11 @@ impl Core {
             })?;
             t.check_program()?;
             let prepared = prepare(&st, t)?;
+            for step in &prepared.1 {
+                if let Step::Write(bytes) | Step::FirstTask(bytes) = step {
+                    st.reg.terminals.get_mut(&id).expect("input target").observe_shell_input(bytes);
+                }
+            }
             st.note_input(id)?;
             self.save_soon();
             st.gates.entry(id).or_default().set_busy(true);

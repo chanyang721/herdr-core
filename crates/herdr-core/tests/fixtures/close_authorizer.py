@@ -25,7 +25,7 @@ if mode == 'eof':
 if mode == 'never_ready':
     sys.stdin.readline()
     sys.exit(1)
-if mode == 'wait':
+if mode in ('wait', 'bad_cancel'):
     deadline = time.monotonic() + 10
     while not (folder / 'go').exists():
         if time.monotonic() > deadline:
@@ -47,6 +47,9 @@ if mode == 'wait_ack':
             sys.exit(1)
         time.sleep(.01)
 if outcome['state'] == 'cancelled':
+    if mode == 'bad_cancel':
+        emit('unclear', allow=False)
+        sys.exit(1)
     emit('cancelled', allow=False)
     (folder / 'lease').unlink()
     sys.exit(1)

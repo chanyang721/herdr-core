@@ -17,6 +17,8 @@ pub struct Target {
     pub turn: u64,
     pub state: String,
     pub protected: bool,
+    #[serde(default)]
+    pub non_agent_history: bool,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -118,6 +120,7 @@ mod tests {
             turn: 1,
             state: "done".into(),
             protected: false,
+            non_agent_history: false,
         }
     }
 

@@ -10,22 +10,32 @@ Windows GNU debug build, Rust 1.99.1, Zig 0.16.0, pinned ConPTY package
 
 - `cargo fmt --all --check`: passed.
 - `cargo clippy -p herdr-core --all-targets -- -D warnings`: passed.
-- Unit tests: 119 passed, including exact closure, kept subtrees, base36
+- Unit tests: 126 passed, including exact closure, kept subtrees, base36
   addresses, input/new-child races, helper bounds/deadlines, actual Exit evidence,
   durable lost-ACK recovery, signal-free reconciliation, no-signal cancellation,
   input epochs, journal write failure and unverified orphan retention.
   A follow-up regression races new-terminal admission against shutdown 64 times:
   stop may win and reject admission, or admission may win and leave a denied
   stop's `stopping` flag false. The production fix already shares one state lock.
-- All-target test run: CLI docs 2, CLI examples 2, platform API 1, Windows 31
+  Review follow-ups cover exact durable no-signal settlement after READY failure,
+  cancellation ACK loss and restart; definite audit denial releases only its
+  fence; unrelated kept recovery reaches a real production SPAWN frame while an
+  uncertain target stays held. Unobserved post-signal exits never become receipts.
+- All-target test run: CLI docs 2, CLI examples 2, platform API 1, Windows 32
   passed. Two independently reproduced baseline failures were filtered below.
 - New Windows production-pipe tests use real disposable ConPTY shells: denial
   preserves the live shell; CLI kill cannot bypass the guard; lost ACK preserves
   rm evidence; reconciliation returns the original exact receipt without a kill.
-- Actual external harness CLI `826f30c` with isolated local data and core identity:
+- Actual external harness CLI `4ceaa56` with isolated local data and core identity
+  (also verified with `826f30c`):
   mismatched machine ID denied while the shell stayed live; exact no-signal
   certificate returned; matching actual core ID allowed a fresh operation;
   closed ACK and exact receipt preceded removal. No paid agent was used.
+  A newly launched interactive shell then received only bare `exit`, produced an
+  actual native Exit witness with positive shell-only history, and passed a new
+  no-signal audit with no pre-scan SID binding. Exact receipt preceded removal.
+  Opaque `cmd /c` history remained false: the helper denied its audit, core
+  persisted cancellation and returned an exact no-signal proof without cleanup.
 
 ## Baseline comparison
 
@@ -54,4 +64,12 @@ and app contracts together. Older running holders do not acquire new sweep
 behavior merely because core is replaced; holder rollout requires separate
 coordination. Remote close remains denied. Natural-exit cleanup needs an exact
 pre-exit SID/generation binding and current external completion evidence;
-unbound historical sessions and unknown/partial outcomes remain held.
+unbound historical agents and unknown/partial outcomes remain held. A newly
+observed ordinary shell can instead use positive shell-only provenance; absence
+of an agent label or SID alone never qualifies. Uncertain operations now fence
+only overlapping subtrees, including kept recovery, and expose `exit_unobserved`
+through read-only snapshots. No manual evidence override was added.
+
+The local candidate archive preserves the candidate/baseline comparison logs,
+the successful serial release-swap log, full fixed-suite results and actual
+helper smoke evidence. Earlier evidence is retained separately as well.

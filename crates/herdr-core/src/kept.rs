@@ -41,15 +41,17 @@ impl Core {
     }
 
     pub(crate) async fn recover_kept(self: Arc<Self>, startup: bool) {
-        let pending = self.lock().reg.terminals.values().any(|t| t.is_live() && t.keep && t.holder.is_none());
+        let pending = {
+            let st = self.lock();
+            st.reg
+                .terminals
+                .values()
+                .any(|t| t.is_live() && t.keep && t.holder.is_none() && !st.close_blocks(&t.address))
+        };
         if !pending || crate::platform::host_shutdown_in_progress() {
             return;
         }
-        if self.sweeps.load(Ordering::SeqCst) != 0
-            || self.lock().stopping
-            || !self.lock().close_inflight.is_empty()
-            || self.restart.load(Ordering::SeqCst)
-        {
+        if self.sweeps.load(Ordering::SeqCst) != 0 || self.lock().stopping || self.restart.load(Ordering::SeqCst) {
             return;
         }
         if let Err(e) = self.ensure_holder().await {
@@ -66,7 +68,6 @@ impl Core {
         let base_env = crate::platform::program_env().await;
         let mut st = self.lock();
         if st.stopping
-            || !st.close_inflight.is_empty()
             || self.restart.load(Ordering::SeqCst)
             || self.sweeps.load(Ordering::SeqCst) != 0
             || crate::platform::host_shutdown_in_progress()
@@ -77,7 +78,13 @@ impl Core {
             .reg
             .terminals
             .values()
-            .filter(|t| t.is_live() && t.keep && t.holder.is_none() && (startup || t.restart_after_ms <= now_ms()))
+            .filter(|t| {
+                t.is_live()
+                    && t.keep
+                    && t.holder.is_none()
+                    && !st.close_blocks(&t.address)
+                    && (startup || t.restart_after_ms <= now_ms())
+            })
             .map(|t| t.id())
             .collect();
         for id in ids {
@@ -98,6 +105,10 @@ impl Core {
             t.scope = Some(scope);
             t.holder = Some(instance);
             t.argv = shell.clone();
+            // Recovery replaces a program inside an old terminal identity;
+            // it does not invent a new lifetime shell-only proof.
+            t.non_agent_history = false;
+            t.shell_exit_input.clear();
             t.cwd = cwd.clone();
             t.template = None;
             t.reported = false;

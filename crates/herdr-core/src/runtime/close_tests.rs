@@ -215,7 +215,8 @@ async fn close_receipt_requires_final_ack_and_preserves_rm_records_and_fences_un
     {
         let mut st = core.lock();
         assert_eq!(st.close_inflight.len(), ids.len());
-        assert!(crate::api::not_stopping(&st).is_err());
+        assert!(crate::api::not_stopping(&st).is_ok());
+        assert!(st.close_blocks(&crate::terminals::address(ids[0])));
         for id in &ids {
             let t = st.reg.terminals.get(id).unwrap();
             assert!(!t.is_live());
@@ -280,6 +281,10 @@ async fn authorizer_deadline_denies_without_sending_a_signal() {
     assert!(core.lock().reg.terminals.values().all(|t| t.is_live()));
     assert!(core.lock().close_inflight.is_empty());
     assert!(core.lock().killing.is_empty());
+    tokio::time::resume(); // reconciliation includes real filesystem persistence
+    let (op, record) = core.lock().reg.close_operations.iter().next().map(|(k, v)| (k.clone(), v.clone())).unwrap();
+    let proof = core.close_reconcile(op, record.roots, record.expected, json!({})).await.unwrap();
+    assert_eq!(proof["no_signal"], true);
     drop(core);
     remove_root(root);
 }
@@ -376,7 +381,12 @@ async fn native_preflight_denial_preserves_a_no_signal_proof_but_never_overwrite
     assert_eq!(proof["no_signal"], true);
     assert_eq!(proof["expected"], json!(expected));
     assert!(proof.get("terminated").is_none());
-    core.lock().reg.close_operations.get_mut(&op).unwrap().cancelled = false;
+    {
+        let mut st = core.lock();
+        let original = st.reg.close_operations.get_mut(&op).unwrap();
+        original.cancelled = false;
+        original.signalled = true;
+    }
     assert!(core.close_transaction(roots.clone(), Some(expected.clone()), json!({}), Some(op.clone())).await.is_err());
     assert!(core.close_reconcile(op, roots, expected, json!({})).await.is_err());
     assert!(core.lock().reg.terminals.values().all(|t| t.is_live()));
@@ -492,5 +502,202 @@ async fn unknown_holder_or_late_spawn_is_retained_instead_of_being_killed_withou
     assert!(frames.try_recv().is_err(), "unverifiable orphan must receive neither SIGNAL nor RELEASE");
     assert!(core.shutdown().await.is_err());
     drop(core);
+    remove_root(root);
+}
+
+#[tokio::test]
+async fn pre_ready_protocol_failures_settle_only_the_exact_durable_no_signal_operation() {
+    for mode in ["eof", "oversized"] {
+        let (core, root, ids) = close_fixture(mode);
+        assert!(core.kill(&ids).await.is_err());
+        let (op, record) = core.lock().reg.close_operations.iter().next().map(|(k, v)| (k.clone(), v.clone())).unwrap();
+        assert!(!record.signalled && !record.cancelled);
+        let mut wrong = record.expected.clone();
+        wrong[0].pid += 1;
+        assert!(core.close_reconcile(op.clone(), record.roots.clone(), wrong, json!({})).await.is_err());
+        assert!(!core.lock().reg.close_operations[&op].cancelled);
+        let proof = core.close_reconcile(op.clone(), record.roots, record.expected.clone(), json!({})).await.unwrap();
+        assert_eq!(proof["no_signal"], true);
+        assert_eq!(proof["expected"], json!(record.expected));
+        assert!(proof.get("terminated").is_none());
+        assert!(core.lock().reg.close_operations[&op].cancelled);
+        assert!(core.lock().close_inflight.is_empty());
+        assert!(core.lock().reg.terminals.values().all(|t| t.is_live()));
+        // Fresh requests can reach policy again, rather than the old global hold.
+        assert!(core.kill(&ids).await.is_err());
+        assert_eq!(core.lock().reg.close_operations.len(), 2);
+        drop(core);
+        remove_root(root);
+    }
+}
+
+#[tokio::test]
+async fn rejected_natural_audit_is_durably_cancelled_and_does_not_fence_unrelated_kept_recovery() {
+    let (core, root, ids) = close_fixture("denied");
+    let roots: Vec<_> = ids.iter().map(|id| crate::terminals::address(*id)).collect();
+    let expected: Vec<crate::close_guard_plan::Identity> =
+        serde_json::from_value(core.close_snapshot(&roots).unwrap()["expected"].clone()).unwrap();
+    {
+        let mut st = core.lock();
+        for id in &ids {
+            core.record_finish(&mut st, *id, Exit { code: Some(0), signal: None }, "exited");
+        }
+    }
+    let error =
+        core.close_reconcile("audit-rejected".into(), roots.clone(), expected.clone(), json!({})).await.unwrap_err();
+    assert_eq!(error.kind, "close_retry_safe");
+    let proof = core.close_reconcile("audit-rejected".into(), roots, expected.clone(), json!({})).await.unwrap();
+    assert_eq!(proof["no_signal"], true);
+    assert_eq!(proof["expected"], json!(expected));
+    let mut st = core.lock();
+    assert!(st.reg.close_operations["audit-rejected"].cancelled);
+    assert!(st.close_inflight.is_empty());
+    st.close_inflight.insert(ids[0]);
+    let kept = st
+        .reg
+        .create(crate::terminals::NewTerminal { argv: vec!["sh".into()], keep: true, ..Default::default() }, now_ms())
+        .unwrap();
+    assert!(!st.close_blocks(&crate::terminals::address(kept)));
+    assert!(st.close_blocks(&crate::terminals::address(ids[0])));
+    drop(st);
+    drop(core);
+    remove_root(root);
+}
+
+#[tokio::test]
+async fn unobserved_post_signal_exit_stays_held_without_blocking_disjoint_terminals() {
+    let (core, root, ids) = close_fixture("ok");
+    assert!(core.kill(&ids).await.is_err());
+    let (op, record) = core.lock().reg.close_operations.iter().next().map(|(k, v)| (k.clone(), v.clone())).unwrap();
+    assert!(record.signalled);
+    let snapshot = core.close_snapshot(&record.roots).unwrap();
+    assert_eq!(snapshot["targets"][0]["native_state"], "unknown");
+    assert_eq!(snapshot["operations"][0]["outcome"], "exit_unobserved");
+    assert!(core.close_reconcile(op.clone(), record.roots, record.expected, json!({})).await.is_err());
+    let other = {
+        let mut st = core.lock();
+        let other = st
+            .reg
+            .create(
+                crate::terminals::NewTerminal { argv: vec!["sh".into()], keep: true, ..Default::default() },
+                now_ms(),
+            )
+            .unwrap();
+        let t = st.reg.terminals.get_mut(&other).unwrap();
+        t.pid = Some(33000);
+        t.program_started_ms = Some(now_ms());
+        assert!(!st.close_blocks(&crate::terminals::address(other)));
+        other
+    };
+    let error = core
+        .close_transaction(vec![crate::terminals::address(other)], Some(vec![]), json!({}), Some("other-op".into()))
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind, "close_retry_safe", "unrelated requests must reach their own preflight");
+    assert!(core.lock().close_inflight.contains(&ids[0]));
+    assert!(!core.lock().reg.close_operations[&op].cancelled);
+    drop(core);
+    remove_root(root);
+}
+
+#[tokio::test]
+async fn a_failed_pre_signal_cancel_ack_can_be_settled_from_native_intent_without_reusing_the_permit() {
+    let (core, root, ids) = close_fixture("bad_cancel");
+    let closing_core = core.clone();
+    let closing_ids = ids.clone();
+    let closing = tokio::spawn(async move { closing_core.kill(&closing_ids).await });
+    for _ in 0..500 {
+        if root.join("request.json").exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(root.join("request.json").exists());
+    core.lock().note_input(ids[0]).unwrap();
+    std::fs::write(root.join("go"), "ready").unwrap();
+    assert!(closing.await.unwrap().is_err());
+    let (op, record) = core.lock().reg.close_operations.iter().next().map(|(k, v)| (k.clone(), v.clone())).unwrap();
+    assert!(!record.signalled && !record.cancelled);
+    let proof = core.close_reconcile(op, record.roots, record.expected, json!({})).await.unwrap();
+    assert_eq!(proof["no_signal"], true);
+    assert!(core.lock().killing.is_empty());
+    assert!(core.lock().reg.terminals.values().all(|t| t.is_live()));
+    drop(core);
+    remove_root(root);
+}
+
+#[tokio::test]
+async fn unrelated_lost_kept_terminal_really_reaches_spawn_while_an_uncertain_target_remains_fenced() {
+    let (core, root, ids) = close_fixture("denied");
+    std::fs::write(&core.paths.config, "shell = [\"fixture\"]\n").unwrap();
+    let (writer, frames) = mpsc::channel();
+    let (bye, _) = mpsc::channel();
+    let other = {
+        let mut st = core.lock();
+        st.close_inflight.insert(ids[0]);
+        st.reg.terminals.get_mut(&ids[0]).unwrap().keep = true;
+        st.reg.finish(ids[0], None, None, "holder_lost", now_ms());
+        let other = st
+            .reg
+            .create(
+                crate::terminals::NewTerminal { argv: vec!["sh".into()], keep: true, ..Default::default() },
+                now_ms(),
+            )
+            .unwrap();
+        st.reg.finish(other, None, None, "holder_lost", now_ms());
+        st.reg.terminals.get_mut(&other).unwrap().restart_after_ms = 0;
+        st.holders.push(Link { writer, pid: 0, instance: "recover-fixture".into(), current: true, bye, bye_rx: None });
+        other
+    };
+    core.clone().recover_kept(false).await;
+    let frame = frames.recv_timeout(Duration::from_secs(5)).unwrap();
+    let (kind, id, _) = proto::read(&mut frame.as_slice()).unwrap().unwrap();
+    assert_eq!(kind, proto::SPAWN);
+    assert_eq!(id, other);
+    assert!(frames.try_recv().is_err());
+    let st = core.lock();
+    assert_eq!(st.reg.terminals[&other].holder.as_deref(), Some("recover-fixture"));
+    assert!(st.reg.terminals[&ids[0]].holder.is_none());
+    assert!(st.close_inflight.contains(&ids[0]));
+    drop(st);
+    drop(core);
+    remove_root(root);
+}
+
+#[tokio::test]
+async fn persisted_pre_ready_failure_can_settle_after_restart_without_inventing_termination() {
+    let (core, root, _) = close_fixture("eof");
+    let roots = vec!["t1".to_string()];
+    let expected: Vec<crate::close_guard_plan::Identity> =
+        serde_json::from_value(core.close_snapshot(&roots).unwrap()["expected"].clone()).unwrap();
+    assert!(
+        core.close_transaction(roots.clone(), Some(expected.clone()), json!({}), Some("restart-no-signal".into()))
+            .await
+            .is_err()
+    );
+    std::fs::write(
+        &core.paths.config,
+        format!("close_guard = {}\n", serde_json::to_string(core.close_guard.as_ref().unwrap()).unwrap()),
+    )
+    .unwrap();
+    core.flush_close_saved().await.unwrap();
+    let paths = Paths {
+        state: core.paths.state.clone(),
+        config: core.paths.config.clone(),
+        socket: core.paths.socket.clone(),
+        holder_socket: core.paths.holder_socket.clone(),
+    };
+    drop(core);
+    let recovered = Core::start(paths, CoreInfo { id: "test".into(), name: "test".into() }).unwrap();
+    let native_before = serde_json::to_value(&recovered.lock().reg.terminals).unwrap();
+    let proof =
+        recovered.close_reconcile("restart-no-signal".into(), roots, expected.clone(), json!({})).await.unwrap();
+    assert_eq!(proof["no_signal"], true);
+    assert_eq!(proof["expected"], json!(expected));
+    assert!(proof.get("terminated").is_none());
+    assert!(!recovered.lock().reg.close_operations["restart-no-signal"].signalled);
+    assert_eq!(serde_json::to_value(&recovered.lock().reg.terminals).unwrap(), native_before);
+    assert!(recovered.lock().reg.close_witnesses.is_empty(), "restart loss is not an actual Exit");
+    drop(recovered);
     remove_root(root);
 }

@@ -96,6 +96,8 @@ fn stamp(t: &mut Terminal, was: Option<String>) {
 }
 
 pub fn apply(t: &mut Terminal, r: &StatusReport) -> Change {
+    t.non_agent_history = false;
+    t.shell_exit_input.clear();
     let (was_working, was_word) = (working(t), word(t));
     let was = stuck(t).map(String::from);
     t.reported = true;

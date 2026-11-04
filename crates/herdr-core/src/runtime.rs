@@ -195,6 +195,8 @@ impl Core {
             // restart; preserve its exact generation for a later actual Exit.
             if !close_inflight.contains(&terminal.id()) {
                 terminal.input_generation = reg.input_epoch << 32;
+                terminal.non_agent_history = false; // observation gap across restart
+                terminal.shell_exit_input.clear();
             }
         }
         let docs_path = paths.state.join("docs.json");
@@ -769,6 +771,7 @@ impl Core {
                 turn: terminal.turn,
                 state: "finished".into(),
                 protected: terminal.keep && terminal.labels.contains_key("herdr.space"),
+                non_agent_history: terminal.non_agent_history && terminal.turn == 0 && !terminal.reported,
             };
             st.reg.close_witnesses.insert(
                 terminal.address.clone(),

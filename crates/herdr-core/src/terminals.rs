@@ -47,6 +47,11 @@ pub struct Terminal {
     pub created_ms: u64,
     #[serde(default)]
     pub input_generation: u64,
+    /// Positive shell-only provenance; absent historical records are unknown.
+    #[serde(default)]
+    pub non_agent_history: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub shell_exit_input: Vec<u8>,
     pub finished_ms: Option<u64>,
     /// "exact", or "inexact" after a core crash (older history may be missing).
     pub screen: String,
@@ -143,6 +148,19 @@ pub struct Terminal {
 }
 
 impl Terminal {
+    pub(crate) fn observe_shell_input(&mut self, bytes: &[u8]) {
+        if !self.non_agent_history {
+            return;
+        }
+        self.shell_exit_input.extend(bytes.iter().map(u8::to_ascii_lowercase));
+        if ![b"exit\r".as_slice(), b"exit\n".as_slice(), b"exit\r\n".as_slice()]
+            .iter()
+            .any(|exit| exit.starts_with(&self.shell_exit_input))
+        {
+            self.non_agent_history = false;
+            self.shell_exit_input.clear();
+        }
+    }
     pub fn id(&self) -> u32 {
         parse_id(&self.address).expect("addresses are t<number>")
     }
@@ -164,6 +182,18 @@ impl Terminal {
         }
         Ok(())
     }
+}
+
+fn known_interactive_shell(argv: &[String]) -> bool {
+    let Some(exe) = argv.first() else { return false };
+    let name = exe.rsplit(['/', '\\']).next().unwrap_or(exe).to_ascii_lowercase();
+    let flags: &[&str] = match name.strip_suffix(".exe").unwrap_or(&name) {
+        "cmd" => &["/q", "/d"],
+        "powershell" | "pwsh" => &["-noprofile", "-nologo", "-noexit"],
+        "sh" | "bash" | "zsh" | "dash" | "ksh" | "fish" => &["-l", "--login", "-i", "--noprofile", "--norc"],
+        _ => return false,
+    };
+    argv[1..].iter().all(|arg| flags.contains(&arg.to_ascii_lowercase().as_str()))
 }
 
 /// After `t` and a first digit 1-9, ids count in these 30: no vowels (no
@@ -261,6 +291,7 @@ impl Registry {
         self.next_id = id.checked_add(1).ok_or_else(|| {
             RpcError::new("unavailable", "this core has used every terminal id", "wipe its state to start over")
         })?;
+        let non_agent_history = new.template.is_none() && known_interactive_shell(&new.argv);
         self.terminals.insert(
             id,
             Terminal {
@@ -282,6 +313,8 @@ impl Registry {
                 reason: None,
                 created_ms: now_ms,
                 input_generation: self.input_epoch << 32,
+                non_agent_history,
+                shell_exit_input: Vec::new(),
                 finished_ms: None,
                 screen: "exact".into(),
                 cols: new.cols,
@@ -413,6 +446,8 @@ impl Registry {
 
 /// The core's own bookkeeping in the record: saved with it, never shown.
 const PRIVATE: &[&str] = &[
+    "non_agent_history",
+    "shell_exit_input",
     "first_task_turn",
     "news",
     "seen",
@@ -483,6 +518,55 @@ fn check_label_key(key: &str) -> Result<(), RpcError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn non_agent_proof_requires_new_interactive_shell_and_never_survives_opaque_work_or_old_records() {
+        let mut reg = Registry::default();
+        for argv in [vec!["cmd", "/q"], vec!["pwsh", "-NoProfile"], vec!["bash", "--norc"]] {
+            let id = reg
+                .create(NewTerminal { argv: argv.into_iter().map(Into::into).collect(), ..Default::default() }, 1)
+                .unwrap();
+            let t = reg.terminals.get_mut(&id).unwrap();
+            assert!(t.non_agent_history);
+            t.observe_shell_input(b"ex");
+            t.observe_shell_input(b"it\r");
+            assert!(t.non_agent_history);
+            let mut legacy = serde_json::to_value(&*t).unwrap();
+            legacy.as_object_mut().unwrap().remove("non_agent_history");
+            let old: Terminal = serde_json::from_value(legacy).unwrap();
+            assert!(!old.non_agent_history);
+        }
+        for argv in
+            [vec!["cmd", "/c", "agent"], vec!["pwsh", "-Command", "agent"], vec!["bash", "-c", "agent"], vec!["agent"]]
+        {
+            let id = reg
+                .create(NewTerminal { argv: argv.into_iter().map(Into::into).collect(), ..Default::default() }, 1)
+                .unwrap();
+            assert!(!reg.terminals[&id].non_agent_history);
+        }
+        let id = reg.create(NewTerminal { argv: vec!["cmd".into()], ..Default::default() }, 1).unwrap();
+        let t = reg.terminals.get_mut(&id).unwrap();
+        t.observe_shell_input(b"agent\r");
+        t.observe_shell_input(b"exit\r");
+        assert!(!t.non_agent_history, "later exit cannot erase previous work");
+        let id = reg.create(NewTerminal { argv: vec!["cmd".into()], ..Default::default() }, 1).unwrap();
+        let t = reg.terminals.get_mut(&id).unwrap();
+        crate::status::apply(
+            t,
+            &ghostty_vt::StatusReport {
+                state: "done",
+                kind: None,
+                progress: None,
+                id: String::new(),
+                app: "agent".into(),
+                title: String::new(),
+                message: String::new(),
+            },
+        );
+        crate::status::reset(t);
+        t.observe_shell_input(b"exit\r");
+        assert!(!t.non_agent_history, "clearing OSC status must not erase lifetime agent observations");
+    }
 
     fn new(name: Option<&str>) -> NewTerminal {
         NewTerminal { name: name.map(Into::into), argv: vec!["true".into()], cwd: "/".into(), ..Default::default() }
