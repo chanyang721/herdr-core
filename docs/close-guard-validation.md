@@ -26,15 +26,20 @@ Windows GNU debug build, Rust 1.99.1, Zig 0.16.0, pinned ConPTY package
 - New Windows production-pipe tests use real disposable ConPTY shells: denial
   preserves the live shell; CLI kill cannot bypass the guard; lost ACK preserves
   rm evidence; reconciliation returns the original exact receipt without a kill.
-- Actual external harness CLI `4ceaa56` with isolated local data and core identity
-  (also verified with `826f30c`):
+- Actual external harness CLI `5b041d4` with isolated local data and core identity
+  (earlier checks also used `4ceaa56` and `826f30c`):
   mismatched machine ID denied while the shell stayed live; exact no-signal
   certificate returned; matching actual core ID allowed a fresh operation;
   closed ACK and exact receipt preceded removal. No paid agent was used.
-  A newly launched interactive shell then received only bare `exit`, produced an
+  A newly launched interactive `cmd /d /q` shell then received only bare `exit`, produced an
   actual native Exit witness with positive shell-only history, and passed a new
   no-signal audit with no pre-scan SID binding. Exact receipt preceded removal.
-  Opaque `cmd /c` history remained false: the helper denied its audit, core
+  Profile/AutoRun-disabled flags are mandatory for positive history; missing
+  `/d` or `-NoProfile` are negative regressions. Bash and other shells remain
+  unknown even with startup-disable flags; effective startup environment is
+  not proven or changed. Bash flag order and login/interactive variants are
+  negative fixtures, with no actual profile or agent execution required.
+  Opaque `cmd /d /c` history remained false: the helper denied its audit, core
   persisted cancellation and returned an exact no-signal proof without cleanup.
 
 ## Baseline comparison

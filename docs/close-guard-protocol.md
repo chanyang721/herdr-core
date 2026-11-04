@@ -134,7 +134,19 @@ acceptance and learning evidence. Missing bindings or unknown records are denied
 and retained. No automatic cleanup scheduler is added.
 
 Ordinary shell exits have a separate positive provenance: only a newly launched
-interactive shell with known arguments starts with `non_agent_history:true`.
+interactive shell with known arguments and disabled startup configuration starts
+with `non_agent_history:true`: `cmd /d` or PowerShell/pwsh `-NoProfile`.
+The flags are mandatory and other arguments must be known
+interactive-only switches. Other shells and profile/AutoRun-enabled launches
+remain unknown; default or user shell configuration is not silently rewritten.
+Bash remains unknown even with `--noprofile --norc`, because this candidate does
+not prove the effective startup environment. Inherited prompt commands or POSIX
+startup settings are not neutralized or inferred safe from argv. See the GNU
+[Bash variables](https://www.gnu.org/software/bash/manual/html_node/Bash-Variables.html)
+and [POSIX mode](https://www.gnu.org/s/bash/manual/html_node/Bash-POSIX-Mode.html)
+reference. User environment variables are never silently rewritten.
+The default Windows PowerShell
+`-Command` prompt hook does not qualify; this change does not alter that hook.
 Opaque `-c`, `-Command`, script/template and historical records default false.
 Any OSC task report, arbitrary input, kept program replacement or restart
 observation gap permanently invalidates it for that identity. Only an empty input

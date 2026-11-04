@@ -187,13 +187,16 @@ impl Terminal {
 fn known_interactive_shell(argv: &[String]) -> bool {
     let Some(exe) = argv.first() else { return false };
     let name = exe.rsplit(['/', '\\']).next().unwrap_or(exe).to_ascii_lowercase();
-    let flags: &[&str] = match name.strip_suffix(".exe").unwrap_or(&name) {
-        "cmd" => &["/q", "/d"],
-        "powershell" | "pwsh" => &["-noprofile", "-nologo", "-noexit"],
-        "sh" | "bash" | "zsh" | "dash" | "ksh" | "fish" => &["-l", "--login", "-i", "--noprofile", "--norc"],
+    let (flags, required): (&[&str], &[&str]) = match name.strip_suffix(".exe").unwrap_or(&name) {
+        "cmd" => (&["/q", "/d"], &["/d"]),
+        "powershell" | "pwsh" => (&["-noprofile", "-nologo", "-noexit"], &["-noprofile"]),
+        // Bash startup also depends on inherited environment. argv alone does
+        // not prove that no commands can execute before observed input.
         _ => return false,
     };
-    argv[1..].iter().all(|arg| flags.contains(&arg.to_ascii_lowercase().as_str()))
+    let args: Vec<_> = argv[1..].iter().map(|arg| arg.to_ascii_lowercase()).collect();
+    args.iter().all(|arg| flags.contains(&arg.as_str()))
+        && required.iter().all(|flag| args.iter().any(|arg| arg == flag))
 }
 
 /// After `t` and a first digit 1-9, ids count in these 30: no vowels (no
@@ -522,7 +525,12 @@ mod tests {
     #[test]
     fn non_agent_proof_requires_new_interactive_shell_and_never_survives_opaque_work_or_old_records() {
         let mut reg = Registry::default();
-        for argv in [vec!["cmd", "/q"], vec!["pwsh", "-NoProfile"], vec!["bash", "--norc"]] {
+        for argv in [
+            vec!["cmd", "/D", "/q"],
+            vec!["cmd", "/q", "/D"],
+            vec!["pwsh", "-NoProfile"],
+            vec!["PoWeRsHeLl.ExE", "-NoLogo", "-nOpRoFiLe"],
+        ] {
             let id = reg
                 .create(NewTerminal { argv: argv.into_iter().map(Into::into).collect(), ..Default::default() }, 1)
                 .unwrap();
@@ -536,21 +544,41 @@ mod tests {
             let old: Terminal = serde_json::from_value(legacy).unwrap();
             assert!(!old.non_agent_history);
         }
-        for argv in
-            [vec!["cmd", "/c", "agent"], vec!["pwsh", "-Command", "agent"], vec!["bash", "-c", "agent"], vec!["agent"]]
-        {
+        for argv in [
+            vec!["cmd"],
+            vec!["cmd", "/q"],
+            vec!["pwsh", "-NoLogo"],
+            vec!["pwsh"],
+            vec!["powershell", "-NoExit"],
+            vec!["bash"],
+            vec!["bash", "--noprofile", "--norc"],
+            vec!["bash", "--norc", "--noprofile"],
+            vec!["bash", "--norc"],
+            vec!["bash", "--noprofile"],
+            vec!["bash", "--login", "--noprofile", "--norc"],
+            vec!["bash", "-l", "--noprofile", "--norc"],
+            vec!["bash", "-i", "--noprofile", "--norc"],
+            vec!["sh"],
+            vec!["zsh", "-f"],
+            vec!["cmd", "/d", "/c", "agent"],
+            vec!["pwsh", "-NoProfile", "-Command", "agent"],
+            vec!["bash", "--noprofile", "--norc", "-c", "agent"],
+            vec!["agent"],
+        ] {
             let id = reg
                 .create(NewTerminal { argv: argv.into_iter().map(Into::into).collect(), ..Default::default() }, 1)
                 .unwrap();
             assert!(!reg.terminals[&id].non_agent_history);
         }
-        let id = reg.create(NewTerminal { argv: vec!["cmd".into()], ..Default::default() }, 1).unwrap();
+        let id = reg.create(NewTerminal { argv: vec!["cmd".into(), "/d".into()], ..Default::default() }, 1).unwrap();
         let t = reg.terminals.get_mut(&id).unwrap();
+        assert!(t.non_agent_history);
         t.observe_shell_input(b"agent\r");
         t.observe_shell_input(b"exit\r");
         assert!(!t.non_agent_history, "later exit cannot erase previous work");
-        let id = reg.create(NewTerminal { argv: vec!["cmd".into()], ..Default::default() }, 1).unwrap();
+        let id = reg.create(NewTerminal { argv: vec!["cmd".into(), "/d".into()], ..Default::default() }, 1).unwrap();
         let t = reg.terminals.get_mut(&id).unwrap();
+        assert!(t.non_agent_history);
         crate::status::apply(
             t,
             &ghostty_vt::StatusReport {

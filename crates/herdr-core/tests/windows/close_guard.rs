@@ -64,7 +64,7 @@ fn native_actual_exit_and_lost_ack_reconcile_return_the_original_exact_receipt()
 #[test]
 fn natural_interactive_shell_exit_preserves_positive_history_for_a_signal_free_exact_audit() {
     let s = guarded("ok");
-    let t = s.bg(&["cmd", "/q"]);
+    let t = s.bg(&["cmd", "/d", "/q"]);
     let live = rpc(&s, "terminal.close_snapshot", json!({"roots":[t]})).unwrap();
     assert_eq!(live["targets"][0]["non_agent_history"], true);
     s.json(&["send", &t, "exit"]);
