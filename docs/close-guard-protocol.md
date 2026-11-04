@@ -139,7 +139,7 @@ with `non_agent_history:true`: `cmd /d` or PowerShell/pwsh `-NoProfile`.
 The flags are mandatory and other arguments must be known
 interactive-only switches. Other shells and profile/AutoRun-enabled launches
 remain unknown; default or user shell configuration is not silently rewritten.
-Bash remains unknown even with `--noprofile --norc`, because this candidate does
+Bash remains unknown even with `bash --noprofile --norc`, because this candidate does
 not prove the effective startup environment. Inherited prompt commands or POSIX
 startup settings are not neutralized or inferred safe from argv. See the GNU
 [Bash variables](https://www.gnu.org/software/bash/manual/html_node/Bash-Variables.html)
