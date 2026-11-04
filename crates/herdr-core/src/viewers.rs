@@ -260,6 +260,13 @@ impl Core {
         };
         if let Some(id) = id {
             let now = st.gates.entry(id).or_default().viewer(bytes, !automatic);
+            if st.close_inflight.contains(&id) {
+                return;
+            }
+            if st.note_input(id).is_err() {
+                return;
+            }
+            self.save_soon();
             if let Some(link) = st.link(id) {
                 link.input(id, &now);
             }
@@ -292,11 +299,15 @@ impl Core {
     /// Focus changes count as activity, and reach programs that asked for them.
     pub fn viewer_focus(&self, conn: &Arc<Conn>, channel: u32, focused: bool) {
         let mut st = self.lock();
+        st.policy_generation = st.policy_generation.wrapping_add(1);
         let id = if focused {
             self.touch(&mut st, conn, channel, |_| {})
         } else {
             Self::viewer(&mut st, conn, channel).filter(|(_, v)| !v.observe).map(|(id, _)| id)
         };
+        if id.is_some_and(|id| st.close_inflight.contains(&id)) {
+            return;
+        }
         if let Some(id) = id
             && st.screens.get(&id).is_some_and(|s| s.dec_mode(1004))
             && let Some(link) = st.link(id)

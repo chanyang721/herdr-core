@@ -232,6 +232,16 @@ paths start at your current folder. Prefer explicit paths for remote work.
   restarted event. Pending input/attach may be unavailable: retry after recovery.
 - Once work is accepted: `hc kill <t>`, then `hc rm <t>`. Only clean up
   terminals you started; `hc ls` includes your user's other live work.
+  A core configured with `close_guard = ["executable", "argument"]` requires
+  transactional authorization before termination or removal. `close-snapshot <t>`
+  reads native identity and input generation without authorizing a close.
+  API clients use `terminal.kill_batch` with complete `roots`, `expected`
+  identities and a durable `operation_id`; apply changes only after its exact
+  successful receipt. On an uncertain outcome, retain that plan and use
+  `terminal.close_reconcile` with the same operation, roots and expected set.
+  It sends no signals. A `no_signal:true` cancellation certificate permits retry
+  with the model preserved; unknown or partial outcomes remain held. There is
+  no single-kill fallback. See `docs/close-guard-protocol.md` for the protocol.
 - `hc update` also restarts an older running core when the installed binary
   is already current. JSON reports `restarted: true`; terminals keep running.
   Managed installs must be updated with their package manager instead, and

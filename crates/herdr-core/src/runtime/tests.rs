@@ -106,7 +106,7 @@ async fn server_stop_succeeds_even_when_the_registry_flush_times_out() {
     assert_eq!(stop.unwrap()["stopped"], true);
 }
 
-fn test_core() -> (Arc<Core>, PathBuf) {
+pub(super) fn test_core() -> (Arc<Core>, PathBuf) {
     let root = std::env::temp_dir().join(format!("hc-persistence-{}", platform::random_hex()));
     let paths = Paths {
         state: root.join("state"),
@@ -432,7 +432,7 @@ async fn waiting_for_holder_start_does_not_block_the_core_executor() {
 
 /// Holder threads can keep the core, and so its registry writer, alive a
 /// moment after the test drops it: a last snapshot may still land.
-fn remove_root(root: impl AsRef<std::path::Path>) {
+pub(super) fn remove_root(root: impl AsRef<std::path::Path>) {
     let start = Instant::now();
     loop {
         match std::fs::remove_dir_all(root.as_ref()) {

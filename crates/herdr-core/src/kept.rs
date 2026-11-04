@@ -45,7 +45,11 @@ impl Core {
         if !pending || crate::platform::host_shutdown_in_progress() {
             return;
         }
-        if self.sweeps.load(Ordering::SeqCst) != 0 || self.lock().stopping || self.restart.load(Ordering::SeqCst) {
+        if self.sweeps.load(Ordering::SeqCst) != 0
+            || self.lock().stopping
+            || !self.lock().close_inflight.is_empty()
+            || self.restart.load(Ordering::SeqCst)
+        {
             return;
         }
         if let Err(e) = self.ensure_holder().await {
@@ -62,6 +66,7 @@ impl Core {
         let base_env = crate::platform::program_env().await;
         let mut st = self.lock();
         if st.stopping
+            || !st.close_inflight.is_empty()
             || self.restart.load(Ordering::SeqCst)
             || self.sweeps.load(Ordering::SeqCst) != 0
             || crate::platform::host_shutdown_in_progress()

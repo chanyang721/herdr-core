@@ -20,6 +20,37 @@ pub struct CoreInfo {
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct Empty {}
 
+#[derive(Deserialize, JsonSchema)]
+pub struct KillBatchParams {
+    #[serde(default)]
+    pub operation_id: Option<String>,
+    pub roots: Vec<String>,
+    pub expected: Vec<crate::close_guard_plan::Identity>,
+    #[serde(default)]
+    pub context: serde_json::Value,
+}
+
+#[derive(Serialize, JsonSchema, Debug)]
+pub struct KillBatchResult {
+    pub ok: bool,
+    pub operation_id: String,
+    pub terminated: Vec<crate::close_guard_plan::Identity>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct CloseReconcileParams {
+    pub operation_id: String,
+    pub roots: Vec<String>,
+    pub expected: Vec<crate::close_guard_plan::Identity>,
+    #[serde(default)]
+    pub context: serde_json::Value,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct CloseSnapshotParams {
+    pub roots: Vec<String>,
+}
+
 // Request types below are both the API's params (serde, schema) and the CLI's
 // arguments (clap): one definition, one doc comment for `--help` and schema.
 // `#[arg(skip)]` fields are filled in by hc itself.

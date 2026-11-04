@@ -45,6 +45,8 @@ pub struct Terminal {
     /// died), stopped_by_restart (nothing ran it any more after a restart).
     pub reason: Option<String>,
     pub created_ms: u64,
+    #[serde(default)]
+    pub input_generation: u64,
     pub finished_ms: Option<u64>,
     /// "exact", or "inexact" after a core crash (older history may be missing).
     pub screen: String,
@@ -207,6 +209,12 @@ pub fn parse_id(local: &str) -> Option<u32> {
 
 #[derive(Serialize, Deserialize, Default)]
 pub struct Registry {
+    #[serde(default)]
+    pub input_epoch: u64,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub close_operations: BTreeMap<String, crate::close_guard_plan::CloseOperation>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub close_witnesses: BTreeMap<String, crate::close_guard_plan::ExitWitness>,
     pub next_id: u32,
     /// The holder these terminals run under.
     pub holder: Option<String>,
@@ -273,6 +281,7 @@ impl Registry {
                 signal: None,
                 reason: None,
                 created_ms: now_ms,
+                input_generation: self.input_epoch << 32,
                 finished_ms: None,
                 screen: "exact".into(),
                 cols: new.cols,

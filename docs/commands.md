@@ -86,6 +86,21 @@ Options:
   -h, --help               Print help
 ```
 
+## hc close-snapshot
+
+```text
+Read a terminal's native close identity and generation; never sends a signal
+
+Usage: hc close-snapshot [OPTIONS] <TERMINAL>
+
+Arguments:
+  <TERMINAL>  The canonical local terminal address
+
+Options:
+      --json  JSON output even in a terminal
+  -h, --help  Print help
+```
+
 ## hc connect
 
 ```text

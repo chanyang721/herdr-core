@@ -12,6 +12,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 const BIN: &str = env!("CARGO_BIN_EXE_herdr-core");
+#[path = "windows/close_guard.rs"]
+mod close_guard;
 static LIVE: Mutex<Vec<(String, PathBuf)>> = Mutex::new(Vec::new());
 
 struct Session {

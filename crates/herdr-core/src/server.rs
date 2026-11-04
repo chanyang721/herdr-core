@@ -414,6 +414,26 @@ async fn handle(
     };
     let call = api::Call { core, conn, plain };
     let params = crate::remote::from_peer(core, conn, request["params"].clone());
+    if matches!(
+        method,
+        "terminal.kill" | "terminal.kill_batch" | "terminal.close_reconcile" | "terminal.close_snapshot"
+    ) && core.close_guard.is_some()
+        && conn.is_some_and(|connection| crate::remote::is_peer(core, connection))
+    {
+        return reply(rpc::response(
+            request["id"].clone(),
+            Err(crate::close_guard::denied("remote guarded close is unsupported")),
+        ));
+    }
+    if core.close_guard.is_some()
+        && method == "terminal.kill"
+        && params["terminal"].as_str().is_some_and(|t| t.contains('/'))
+    {
+        return reply(rpc::response(
+            request["id"].clone(),
+            Err(crate::close_guard::denied("remote guarded close is unsupported")),
+        ));
+    }
     let result = match crate::remote::route(core, method, &params) {
         _ if method == "$/orphaned" => crate::remote::orphaned(core, conn, &params).await,
         Ok(Some((crate::remote::To::Machine(machine), params))) if method == "terminal.attach" => match conn {

@@ -98,6 +98,11 @@ enum Cmd {
     },
     /// Every API method with its JSON Schema, for app builders.
     Schema,
+    /// Read a terminal's native close identity and generation; never sends a signal.
+    CloseSnapshot {
+        /// The canonical local terminal address.
+        terminal: String,
+    },
     /// Speak the protocol over stdin/stdout (`ssh box hc connect`).
     Connect {
         /// The hc session to reach, like HC_SESSION (one command that reads
@@ -550,6 +555,11 @@ fn run(cmd: Option<Cmd>, json: bool, asked: bool) -> Result<Option<Out>, RpcErro
             let human = serde_json::to_string_pretty(&r).unwrap_or_default();
             Out { json: r, human }
         }
+        Cmd::CloseSnapshot { terminal } => {
+            let r = call("terminal.close_snapshot", json!({"roots":[terminal]}))?;
+            let human = serde_json::to_string_pretty(&r).unwrap_or_default();
+            Out { json: r, human }
+        }
         Cmd::Server { action: action @ (ServerCmd::Start | ServerCmd::Status | ServerCmd::Restart) } => {
             if matches!(action, ServerCmd::Restart)
                 && let Some(stream) = client::connect_existing(&paths)
@@ -870,6 +880,7 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("events", "events.subscribe"),
     ("templates", "templates.list"),
     ("schema", "rpc.discover"),
+    ("close-snapshot", "terminal.close_snapshot"),
     ("server start", "server.status"),
     ("server status", "server.status"),
     ("server stop", "server.stop"),
@@ -881,7 +892,7 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("machine rm", "machine.rm"),
 ];
 /// Client-only methods: handshake and opaque document storage.
-pub const API_ONLY: &[&str] = &["hello", "doc.get", "doc.set"];
+pub const API_ONLY: &[&str] = &["hello", "doc.get", "doc.set", "terminal.kill_batch", "terminal.close_reconcile"];
 
 #[cfg(test)]
 mod tests {

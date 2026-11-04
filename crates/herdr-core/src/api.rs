@@ -81,6 +81,15 @@ methods! { Ctx<'_>;
     "terminal.kill" => terminal_kill, TerminalParams => Public,
         "End the program: hangup, then terminate, then kill. Returns the observed result.",
         errors ["not_found", "machine_unknown"];
+    "terminal.kill_batch" => terminal_kill_batch, KillBatchParams => KillBatchResult,
+        "Close an exact local batch through the configured transactional authorizer. No fallback.",
+        errors ["close_denied", "close_retry_safe"];
+    "terminal.close_reconcile" => terminal_close_reconcile, CloseReconcileParams => serde_json::Value,
+        "Reconcile the exact original close operation without sending any termination signal.",
+        errors ["close_denied"];
+    "terminal.close_snapshot" => terminal_close_snapshot, CloseSnapshotParams => serde_json::Value,
+        "Read canonical native identities and input generations, including retained exit witnesses. No close authorization.",
+        errors ["close_denied"];
     "terminal.rm" => terminal_rm, TerminalParams => RemoveResult,
         "Remove a finished terminal.",
         errors ["not_found", "machine_unknown", "live"];
@@ -217,6 +226,9 @@ async fn server_status(core: Ctx<'_>, _: Empty) -> Result<StatusResult, RpcError
 
 async fn server_stop(core: Ctx<'_>, _: Empty) -> Result<StopResult, RpcError> {
     if let Err(e) = core.shutdown().await {
+        if e.kind == "close_denied" {
+            return Err(e);
+        }
         eprintln!("core: shutdown registry flush failed: {}", e.message);
     }
     Ok(StopResult { stopped: true })
@@ -286,8 +298,7 @@ async fn terminal_get(core: Ctx<'_>, p: TerminalParams) -> Result<Public, RpcErr
 async fn terminal_kill(core: Ctx<'_>, p: TerminalParams) -> Result<Public, RpcError> {
     let id = resolve(core, &p.terminal)?;
     if core.lock().reg.terminals.get(&id).is_some_and(|t| t.is_live()) {
-        core.lock().killing.insert(id);
-        core.kill(&[id]).await;
+        core.kill(&[id]).await?;
     }
     core.saw(p.caller.as_deref(), id); // covers the exit it caused
     let result = record(core, id).map(Public);
@@ -295,8 +306,27 @@ async fn terminal_kill(core: Ctx<'_>, p: TerminalParams) -> Result<Public, RpcEr
     result
 }
 
+async fn terminal_kill_batch(core: Ctx<'_>, p: KillBatchParams) -> Result<KillBatchResult, RpcError> {
+    let result = core.close_transaction(p.roots, Some(p.expected), p.context, p.operation_id).await?;
+    core.flush_saved().await?;
+    Ok(result)
+}
+
+async fn terminal_close_reconcile(core: Ctx<'_>, p: CloseReconcileParams) -> Result<serde_json::Value, RpcError> {
+    let result = core.close_reconcile(p.operation_id, p.roots, p.expected, p.context).await?;
+    core.flush_saved().await?;
+    Ok(result)
+}
+
+async fn terminal_close_snapshot(core: Ctx<'_>, p: CloseSnapshotParams) -> Result<serde_json::Value, RpcError> {
+    core.close_snapshot(&p.roots)
+}
+
 async fn terminal_rm(core: Ctx<'_>, p: TerminalParams) -> Result<RemoveResult, RpcError> {
     let id = resolve(core, &p.terminal)?;
+    if core.close_guard.is_some() && !core.lock().close_verified.contains(&id) {
+        return Err(crate::close_guard::denied("terminal removal has no verified close receipt"));
+    }
     {
         let mut st = core.lock();
         if st.reg.terminals.get(&id).is_some_and(|t| t.is_live()) {
@@ -341,6 +371,7 @@ async fn terminal_label(core: Ctx<'_>, p: LabelParams) -> Result<Public, RpcErro
         let mut st = core.lock();
         let was = st.reg.terminals.get(&id).cloned();
         st.reg.label(id, &labels(&p.labels))?;
+        st.policy_generation = st.policy_generation.wrapping_add(1);
         core.save(&st);
         let labels = serde_json::to_value(&st.reg.terminals[&id].labels).unwrap_or_default();
         core.emit_from(&mut st, "labels", id, json!({"labels": labels}), was.as_ref());

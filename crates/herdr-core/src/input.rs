@@ -21,6 +21,7 @@ const SETTLE_MAX: Duration = Duration::from_secs(5);
 /// A person's typing, as it affects agent input to one terminal.
 #[derive(Default)]
 pub struct Gate {
+    pub(crate) generation: u64,
     last_human: Option<Instant>,
     /// An agent's input is going in right now: viewer input waits.
     busy: bool,
@@ -29,6 +30,9 @@ pub struct Gate {
 }
 
 impl Gate {
+    pub(crate) fn close_ready(&self) -> bool {
+        !self.busy && self.held.is_empty()
+    }
     /// A person pressed keys while an agent's input was going in.
     pub fn has_held(&self) -> bool {
         self.held_human
@@ -36,6 +40,7 @@ impl Gate {
 
     /// Starts or ends an agent's input; ending returns the viewer bytes held meanwhile.
     pub fn set_busy(&mut self, busy: bool) -> Vec<u8> {
+        self.generation = self.generation.wrapping_add(1);
         self.busy = busy;
         if busy {
             Vec::new()
@@ -48,6 +53,9 @@ impl Gate {
     /// Viewer bytes: straight through, or held while an agent types.
     /// Only human input resets the quiet period.
     pub fn viewer(&mut self, bytes: &[u8], human: bool) -> Vec<u8> {
+        if !bytes.is_empty() {
+            self.generation = self.generation.wrapping_add(1);
+        }
         if human {
             self.last_human = Some(Instant::now());
         }
@@ -65,6 +73,18 @@ pub enum Step {
     FirstTask(Vec<u8>),
     Write(Vec<u8>),
     Pause(Duration),
+}
+
+impl State {
+    pub(crate) fn note_input(&mut self, id: u32) -> Result<(), RpcError> {
+        let terminal =
+            self.reg.terminals.get_mut(&id).ok_or_else(|| crate::close_guard::denied("input target vanished"))?;
+        if terminal.input_generation as u32 == u32::MAX {
+            return Err(crate::close_guard::denied("input generation exhausted; restart required"));
+        }
+        terminal.input_generation += 1;
+        Ok(())
+    }
 }
 
 fn env_ms(var: &str, default: u64) -> Duration {
@@ -129,6 +149,9 @@ impl Core {
         }
         let (out, steps) = {
             let mut st = self.lock();
+            if st.close_inflight.contains(&id) {
+                return Err(crate::close_guard::denied("terminal close in progress"));
+            }
             let t = st.reg.terminals.get(&id).filter(|t| t.is_live()).ok_or_else(|| {
                 RpcError::new(
                     "finished",
@@ -138,7 +161,9 @@ impl Core {
             })?;
             t.check_program()?;
             let prepared = prepare(&st, t)?;
-            st.gates.entry(id).or_default().busy = true;
+            st.note_input(id)?;
+            self.save_soon();
+            st.gates.entry(id).or_default().set_busy(true);
             prepared
         };
         for step in steps {

@@ -18,9 +18,13 @@ use std::time::{Duration, Instant, SystemTime};
 use tokio::sync::{Notify, oneshot};
 
 mod persistence;
+mod termination;
 use persistence::RegistryWriter;
 
 pub struct Core {
+    pub(crate) close_guard: Option<Vec<String>>,
+    pub(crate) close_serial: tokio::sync::Mutex<()>,
+    pub(crate) close_session: Option<std::ffi::OsString>,
     pub info: CoreInfo,
     pub started: Instant,
     pub stop: Notify,
@@ -45,6 +49,11 @@ pub struct Core {
 
 #[derive(Default)]
 pub struct State {
+    pub(crate) close_unverified_orphan: bool,
+    pub(crate) policy_generation: u64,
+    pub(crate) close_inflight: HashSet<u32>,
+    pub(crate) close_verified: HashSet<u32>,
+    pub(crate) close_observed_exit: HashSet<u32>,
     pub reg: Registry,
     pub docs: std::collections::BTreeMap<String, crate::api::DocGetResult>,
     pub screens: HashMap<u32, Screen>,
@@ -162,7 +171,32 @@ fn finish_reason(killed: bool, stopping: bool, host_shutdown: bool) -> &'static 
 
 impl Core {
     pub fn start(paths: Paths, info: CoreInfo) -> io::Result<Arc<Core>> {
-        let reg: Registry = read_state(&paths.state.join("terminals.json"))?;
+        let close_guard = crate::config::load(&paths.config).map_err(|e| io::Error::other(e.message))?.close_guard;
+        let mut reg: Registry = read_state(&paths.state.join("terminals.json"))?;
+        let epoch_path = paths.state.join("close-input-epoch.json");
+        let prior_epoch: u64 = read_state(&epoch_path)?;
+        reg.input_epoch = reg
+            .input_epoch
+            .max(prior_epoch)
+            .checked_add(1)
+            .filter(|epoch| *epoch <= u32::MAX as u64)
+            .ok_or_else(|| io::Error::other("input generation epoch exhausted"))?;
+        let close_inflight: HashSet<u32> = if close_guard.is_some() {
+            reg.close_operations
+                .values()
+                .filter(|op| (op.signalled || op.audit_only) && !op.acknowledged)
+                .flat_map(|op| op.expected.iter().filter_map(|t| crate::terminals::parse_id(&t.address)))
+                .collect()
+        } else {
+            HashSet::new()
+        };
+        for terminal in reg.terminals.values_mut().filter(|t| t.is_live()) {
+            // An unresolved signalled operation remains input-fenced across
+            // restart; preserve its exact generation for a later actual Exit.
+            if !close_inflight.contains(&terminal.id()) {
+                terminal.input_generation = reg.input_epoch << 32;
+            }
+        }
         let docs_path = paths.state.join("docs.json");
         let docs = read_state(&docs_path).unwrap_or_else(|e| {
             eprintln!("core: cannot load documents, starting empty: {e}");
@@ -172,17 +206,22 @@ impl Core {
             Default::default()
         });
         std::fs::create_dir_all(paths.state.join("screens"))?;
+        write_atomic(&epoch_path, &serde_json::to_vec(&reg.input_epoch)?)?;
+        write_atomic(&paths.state.join("terminals.json"), &serde_json::to_vec(&reg)?)?;
         let machines = read_state(&paths.state.join("machines.json"))?;
         let peers = read_state(&paths.state.join("peers.json"))?;
         let (jobs, jobs_rx) = tokio::sync::mpsc::unbounded_channel();
         let core = Arc::new(Core {
+            close_guard,
+            close_serial: Default::default(),
+            close_session: std::env::var_os("HC_SESSION"),
             info,
             started: Instant::now(),
             stop: Notify::new(),
             restart: Default::default(),
             registry_writer: RegistryWriter::new(paths.state.join("terminals.json"))?,
             paths,
-            state: Mutex::new(State { reg, docs, machines, peers, ..Default::default() }),
+            state: Mutex::new(State { reg, docs, machines, peers, close_inflight, ..Default::default() }),
             changed: Notify::new(),
             jobs,
             jobs_rx: Mutex::new(Some(jobs_rx)),
@@ -237,6 +276,13 @@ impl Core {
                 )
             })?
             .map_err(|e| crate::rpc::RpcError::internal(format!("cannot save terminals: {e}")))
+    }
+
+    pub(crate) async fn flush_close_saved(&self) -> Result<(), crate::rpc::RpcError> {
+        tokio::time::timeout(Duration::from_secs(10), self.registry_writer.flush_durable())
+            .await
+            .map_err(|_| crate::close_guard::denied("native close journal persistence timed out"))?
+            .map_err(|e| crate::close_guard::denied(format!("native close journal was not saved: {e}")))
     }
 
     /// For frequent changes a crash may lose (the next start rebuilds them):
@@ -419,6 +465,11 @@ impl Core {
             let id = h.id;
             if !st.reg.terminals.get(&id).is_some_and(ours) {
                 // Spawned for a core that never recorded it: nobody can address it.
+                if self.close_guard.is_some() {
+                    st.close_unverified_orphan = true;
+                    eprintln!("core: retaining unverified orphan {}", crate::terminals::address(id));
+                    continue;
+                }
                 let link = st.holders.iter().find(|l| l.instance == instance).expect("attached");
                 link.send(&proto::json_frame(proto::SIGNAL, id, &proto::Signal { signal: signal::KILL }));
                 link.send(&proto::frame(proto::RELEASE, id, &[]));
@@ -663,7 +714,12 @@ impl Core {
             }
             (Ok(_), _) => {
                 // Its run gave up waiting: nobody can address it, so it must not live.
-                if let Some(link) = st.holders.iter().find(|l| l.instance == instance) {
+                if self.close_guard.is_some() {
+                    st.close_unverified_orphan = true;
+                }
+                if self.close_guard.is_none()
+                    && let Some(link) = st.holders.iter().find(|l| l.instance == instance)
+                {
                     link.send(&proto::json_frame(proto::SIGNAL, id, &proto::Signal { signal: signal::KILL }));
                     link.send(&proto::frame(proto::RELEASE, id, &[]));
                 }
@@ -694,6 +750,40 @@ impl Core {
     pub(crate) fn record_finish(&self, st: &mut State, id: u32, exit: Exit, reason: &str) {
         if !st.reg.terminals.get(&id).is_some_and(|t| t.is_live()) {
             return;
+        }
+        if st.close_inflight.contains(&id) && (exit.code.is_some() || exit.signal.is_some()) {
+            st.close_observed_exit.insert(id);
+        }
+        if self.close_guard.is_some() && (exit.code.is_some() || exit.signal.is_some()) {
+            let terminal = &st.reg.terminals[&id];
+            let identity = crate::close_guard_plan::Identity {
+                address: terminal.address.clone(),
+                pid: terminal.pid.unwrap_or(0),
+                created_ms: terminal.created_ms,
+            };
+            let target = crate::close_guard_plan::Target {
+                identity: identity.clone(),
+                parent: terminal.parent.clone(),
+                program_started_ms: terminal.program_started_ms.unwrap_or(0),
+                input_generation: terminal.input_generation,
+                turn: terminal.turn,
+                state: "finished".into(),
+                protected: terminal.keep && terminal.labels.contains_key("herdr.space"),
+            };
+            st.reg.close_witnesses.insert(
+                terminal.address.clone(),
+                crate::close_guard_plan::ExitWitness {
+                    target,
+                    code: exit.code,
+                    signal: exit.signal,
+                    finished_ms: now_ms(),
+                },
+            );
+            for operation in st.reg.close_operations.values_mut() {
+                if operation.signalled && !operation.acknowledged && operation.expected.contains(&identity) {
+                    operation.observed_exits.insert(identity.address.clone());
+                }
+            }
         }
         let reason = if st.killing.remove(&id) {
             "killed"
@@ -764,9 +854,13 @@ impl Core {
     }
 
     pub fn remove(&self, st: &mut State, id: u32) {
+        if st.close_inflight.contains(&id) || (self.close_guard.is_some() && !st.close_verified.contains(&id)) {
+            return;
+        }
         // Gone before it is announced: a fresh snapshot for a subscriber that
         // fell behind must not bring it back.
         let Some(was) = st.reg.terminals.remove(&id) else { return };
+        st.close_verified.remove(&id);
         self.emit_from(st, "removed", id, serde_json::json!({}), Some(&was));
         let _ = std::fs::remove_file(self.snapshot_path(id));
         let _ = std::fs::remove_dir_all(crate::put::dir(&self.paths.state, id));
@@ -794,152 +888,10 @@ impl Core {
             }
         }
     }
-
-    /// Hang up, then escalate. Returns once the program ended or KILL timed out.
-    pub async fn kill(&self, ids: &[u32]) {
-        let all_done = |st: &State| {
-            ids.iter().all(|id| !st.reg.terminals.get(id).is_some_and(|t| t.is_live() && t.holder.is_some()))
-        };
-        {
-            let mut st = self.lock();
-            for &id in ids {
-                if st
-                    .reg
-                    .terminals
-                    .get(&id)
-                    .is_some_and(|t| t.is_live() && (t.holder.is_none() || (t.reason.is_some() && t.pid.is_none())))
-                {
-                    let reason = if st.killing.contains(&id) { "killed" } else { "server_stop" };
-                    if let Some(link) = st.link(id) {
-                        link.send(&proto::json_frame(proto::SIGNAL, id, &proto::Signal { signal: signal::KILL }));
-                        link.send(&proto::frame(proto::RELEASE, id, &[]));
-                    }
-                    self.record_finish(&mut st, id, Exit { code: None, signal: None }, reason);
-                }
-            }
-            self.save(&st);
-        }
-        for (signal, wait) in [(signal::HUP, 500), (signal::TERM, 500), (signal::KILL, 2000)] {
-            {
-                let st = self.lock();
-                for &id in ids {
-                    self.signal(&st, id, signal);
-                }
-            }
-            if self.wait_for(Duration::from_millis(wait), all_done).await {
-                return;
-            }
-        }
-    }
-
-    /// Ends every link on purpose and waits until each holder confirms.
-    fn goodbye(&self, mode: Goodbye) {
-        let _starting = self.holder_start.lock().unwrap_or_else(|p| p.into_inner());
-        let byes: Vec<mpsc::Receiver<()>> = {
-            let mut st = self.lock();
-            st.holders
-                .iter_mut()
-                .filter_map(|link| {
-                    link.send(&proto::json_frame(proto::GOODBYE, 0, &mode));
-                    link.bye_rx.take()
-                })
-                .collect()
-        };
-        if mode == Goodbye::Shutdown {
-            let sockets: Vec<_> = self.lock().disconnected.drain().map(|(_, path)| path).collect();
-            for path in sockets {
-                if let Ok(mut stream) = platform::connect(&path) {
-                    let Ok(watch) = stream.try_clone() else { continue };
-                    let (done, waiting) = mpsc::channel::<()>();
-                    std::thread::spawn(move || {
-                        if waiting.recv_timeout(Duration::from_secs(6)) == Err(mpsc::RecvTimeoutError::Timeout) {
-                            let _ = watch.shutdown(std::net::Shutdown::Both);
-                        }
-                    });
-                    // The welcome may be unreadable (the reason relink failed).
-                    // Shutdown needs no inventory: the holder sweeps everything it owns.
-                    let hello = proto::json_frame(proto::HELLO, 0, &proto::Hello { version: proto::VERSION });
-                    if io::Write::write_all(&mut stream, &hello).is_ok()
-                        && io::Write::write_all(&mut stream, &proto::json_frame(proto::GOODBYE, 0, &mode)).is_ok()
-                    {
-                        let _ = io::copy(&mut stream, &mut io::sink());
-                    }
-                    drop(done);
-                }
-            }
-        }
-        for rx in byes {
-            // A holder told to shut down first ends every leftover (up to ~3 s).
-            let _ = rx.recv_timeout(Duration::from_secs(6));
-        }
-    }
-
-    /// Ends what lost terminals left running, in the background but counted:
-    /// stop and restart wait for it.
-    fn sweep_in_background(&self, scopes: Vec<String>) {
-        if scopes.is_empty() {
-            return;
-        }
-        self.sweeps.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let sweeps = self.sweeps.clone();
-        std::thread::spawn(move || {
-            crate::sweep::sweep(&scopes);
-            sweeps.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
-        });
-    }
-
-    fn wait_for_sweeps(&self) {
-        let deadline = Instant::now() + Duration::from_secs(6);
-        while self.sweeps.load(std::sync::atomic::Ordering::SeqCst) > 0 && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(25));
-        }
-    }
-
-    /// Planned restart: the holder keeps programs; we save every screen exactly.
-    pub async fn handover(&self) -> io::Result<()> {
-        self.wait_for_sweeps();
-        self.goodbye(Goodbye::Handover);
-        self.wait_for_sweeps(); // a holder that died during goodbye left one
-        {
-            let mut st = self.lock();
-            st.holders.clear();
-            let State { screens, relays, .. } = &mut *st;
-            for (id, screen) in screens.iter_mut() {
-                if let Some(relay) = relays.get_mut(id) {
-                    relay.flush(screen);
-                }
-                if let Some(snapshot) = screen.snapshot() {
-                    let _ = write_atomic(&self.snapshot_path(*id), &snapshot);
-                }
-            }
-            self.save(&st);
-        }
-        self.registry_writer.flush().await
-    }
-
-    /// Server stop: end every program, then let the holder exit.
-    pub async fn shutdown(&self) -> Result<(), crate::rpc::RpcError> {
-        let live: Vec<u32> = {
-            let mut st = self.lock();
-            st.stopping = true;
-            st.reg.terminals.values().filter(|t| t.is_live()).map(|t| t.id()).collect()
-        };
-        self.changed.notify_waiters(); // execs end
-        self.kill(&live).await;
-        crate::exec::wait_all().await;
-        self.wait_for_sweeps();
-        self.goodbye(Goodbye::Shutdown);
-        self.wait_for_sweeps(); // a holder that died during goodbye left one
-        {
-            let mut st = self.lock();
-            for id in live {
-                self.record_finish(&mut st, id, Exit { code: None, signal: None }, "server_stop");
-            }
-            self.save(&st);
-        }
-        self.flush_saved().await
-    }
 }
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod close_tests;
