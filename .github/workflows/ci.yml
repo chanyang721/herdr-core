@@ -71,11 +71,12 @@ jobs:
       # macOS (3 cores): fewer tests at once, so each one's terminals keep
       # their timing. Windows: Unix tests skip themselves; tests/windows.rs
       # runs instead.
+      # Forks: macOS only when run by hand. Hosted macOS runners there often
+      # go unassigned, and an unassigned job fails the whole run.
       matrix:
-        include:
-          - { os: linux, runner: ubuntu-latest, target: x86_64-unknown-linux-musl, threads: 4 }
-          - { os: macos, runner: macos-15, target: aarch64-apple-darwin, threads: 2 }
-          - { os: windows, runner: windows-2025, target: x86_64-pc-windows-msvc, threads: 2 }
+        include: ${{ fromJSON(github.repository_owner != 'herdrdev' && github.event_name != 'workflow_dispatch'
+          && '[{"os":"linux","runner":"ubuntu-latest","target":"x86_64-unknown-linux-musl","threads":4},{"os":"windows","runner":"windows-2025","target":"x86_64-pc-windows-msvc","threads":2}]'
+          || '[{"os":"linux","runner":"ubuntu-latest","target":"x86_64-unknown-linux-musl","threads":4},{"os":"macos","runner":"macos-15","target":"aarch64-apple-darwin","threads":2},{"os":"windows","runner":"windows-2025","target":"x86_64-pc-windows-msvc","threads":2}]') }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     steps:
@@ -164,7 +165,8 @@ jobs:
   # Keep the required check name stable; every platform and upgrade must pass.
   ci-ok:
     needs: [lint, test, upgrade]
-    if: always()
+    # Forks: a run cancelled by a newer push is not a failure.
+    if: ${{ github.repository_owner == 'herdrdev' && always() || !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
