@@ -606,16 +606,22 @@ async fn a_failed_pre_signal_cancel_ack_can_be_settled_from_native_intent_withou
     let closing_core = core.clone();
     let closing_ids = ids.clone();
     let closing = tokio::spawn(async move { closing_core.kill(&closing_ids).await });
-    for _ in 0..500 {
-        if root.join("request.json").exists() {
-            break;
+    // Preparation includes durable disk IO (up to 10s) and Python startup.
+    // Await the actual protocol stage, not a shorter five-second fixture race.
+    let preparation = tokio::time::Instant::now() + Duration::from_secs(30);
+    while !root.join("request.json").exists() {
+        if closing.is_finished() {
+            panic!("close ended before authorizer request: {:?}", closing.await);
         }
+        assert!(tokio::time::Instant::now() < preparation, "authorizer never received its request");
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    assert!(root.join("request.json").exists());
     core.lock().note_input(ids[0]).unwrap();
     std::fs::write(root.join("go"), "ready").unwrap();
     assert!(closing.await.unwrap().is_err());
+    let outcome: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(root.join("outcome.json")).unwrap()).unwrap();
+    assert_eq!(outcome["state"], "cancelled", "this regression must exercise an actual cancellation ACK failure");
     let (op, record) = core.lock().reg.close_operations.iter().next().map(|(k, v)| (k.clone(), v.clone())).unwrap();
     assert!(!record.signalled && !record.cancelled);
     let proof = core.close_reconcile(op, record.roots, record.expected, json!({})).await.unwrap();
