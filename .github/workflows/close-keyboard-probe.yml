@@ -1,0 +1,58 @@
+name: close-keyboard-baseline-probe
+on:
+  push:
+    branches: [ci/close-keyboard-probe-z]
+permissions:
+  contents: read
+jobs:
+  baseline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          submodules: true
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
+        with:
+          toolchain: 1.95.0
+          targets: x86_64-unknown-linux-musl
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29
+        with:
+          version: 0.16.0
+      - name: Unchanged installed-baseline keyboard test
+        id: original
+        continue-on-error: true
+        run: cargo test --locked --target x86_64-unknown-linux-musl --test m4 keys_follow_the_programs_keyboard_modes -- --exact --nocapture --test-threads=1
+      - name: Observe original and readiness-controlled input without changing assertions
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import os, subprocess, tempfile, pathlib, json, time, uuid
+          binary = pathlib.Path('target/x86_64-unknown-linux-musl/debug/herdr-core').resolve()
+          assert binary.is_file()
+          for ready in (False, True):
+              root = pathlib.Path(tempfile.mkdtemp(prefix='core-keyboard-baseline-'))
+              env = {k:v for k,v in os.environ.items() if not k.startswith('HC_')}
+              env.update(HC_SESSION='kb-'+uuid.uuid4().hex[:10], XDG_STATE_HOME=str(root/'state'), XDG_CONFIG_HOME=str(root/'config'))
+              def call(*args):
+                  p=subprocess.run([str(binary),*args],env=env,capture_output=True,text=True,timeout=20)
+                  assert p.returncode == 0, (args,p.stderr)
+                  return p.stdout
+              try:
+                  body="printf '\\033[?1h'; stty raw -echo; "+("printf READY; " if ready else "")+"od -An -c"
+                  address=json.loads(call('run','--bg','sh','-c',body))['address']
+                  if ready:
+                      until=time.monotonic()+10
+                      while 'READY' not in call('read',address):
+                          assert time.monotonic()<until
+                          time.sleep(.02)
+                  else: time.sleep(.2)
+                  call('keys',address,'up','ctrl+c',*(['a']*12))
+                  time.sleep(.5)
+                  print(json.dumps(dict(ready=ready,stage='original16bytes',screen=call('read',address))),flush=True)
+                  call('keys',address,*(['z']*16))
+                  time.sleep(.5)
+                  print(json.dumps(dict(ready=ready,stage='additional16bytes',screen=call('read',address))),flush=True)
+              finally: call('server','stop')
+          PY
