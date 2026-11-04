@@ -10,7 +10,8 @@ Windows GNU debug build, Rust 1.99.1, Zig 0.16.0, pinned ConPTY package
 
 - `cargo fmt --all --check`: passed.
 - `cargo clippy -p herdr-core --all-targets -- -D warnings`: passed.
-- Unit tests: 126 passed, including exact closure, kept subtrees, base36
+- Unit tests: 127 passed, including explicit result schemas and wire-shape round trips,
+  exact closure, kept subtrees, base36
   addresses, input/new-child races, helper bounds/deadlines, actual Exit evidence,
   durable lost-ACK recovery, signal-free reconciliation, no-signal cancellation,
   input epochs, journal write failure and unverified orphan retention.
@@ -55,6 +56,15 @@ task-local copy of the installed `6809ff5` executable. Both failed identically:
 The release-swap test initially failed with Windows disk-full error 112 during
 parallel executable copies. Its individual serial rerun and the final serial
 Windows run both passed. No user data or shared build cache was deleted.
+
+Linux keyboard-mode timeout was also reproduced on the unchanged installed
+`6809ff5` baseline. The runner used uutils `od` 0.10.0, which produced no streaming
+output for the original input, including after readiness synchronization. A
+bounded 16-byte capture followed by EOF emitted the exact original expected
+sequence. The fixture now uses `dd` to provide that EOF and retains a live shell
+for the invalid-key assertion; expected input/output and checks are unchanged.
+Recovery and snapshot APIs now publish explicit typed result schemas, and the
+human command summary includes `close-snapshot`.
 
 ## Limits and application conditions
 

@@ -193,12 +193,19 @@ fn a_program_that_never_reads_its_input_stalls_nobody() {
 #[test]
 fn keys_follow_the_programs_keyboard_modes() {
     let s = session();
-    let t = s.json(&["run", "--bg", "sh", "-c", "printf '\\033[?1h'; stty raw -echo; od -An -c"])["address"]
+    // Some od implementations buffer until EOF even on a PTY. Bound the
+    // capture to the exact 16 input bytes; keep the shell live for invalid keys.
+    let t = s.json(&[
+        "run",
+        "--bg",
+        "sh",
+        "-c",
+        "printf '\\033[?1h'; stty raw -echo; printf READY; dd bs=1 count=16 2>/dev/null | od -An -c; sleep 100",
+    ])["address"]
         .as_str()
         .unwrap()
         .to_string();
-    shows(&s, &t, ""); // started
-    std::thread::sleep(Duration::from_millis(200));
+    shows(&s, &t, "READY"); // raw mode and application-cursor output have arrived
     s.json(&["keys", &t, "up", "ctrl+c", "a", "a", "a", "a", "a", "a", "a", "a", "a", "a", "a", "a"]);
     shows(&s, &t, "033   O   A 003   a");
     let (code, err) = s.err(&["keys", &t, "hyper+q"]);
