@@ -94,6 +94,44 @@ async fn configured_close_denial_never_changes_targets_or_stopping_state() {
 }
 
 #[tokio::test]
+async fn guarded_shutdown_and_new_terminal_admission_have_only_two_atomic_outcomes() {
+    for _ in 0..64 {
+        let (mut core, root) = test_core();
+        Arc::get_mut(&mut core).unwrap().close_guard = Some(vec!["must-not-run".into()]);
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+        let closing = core.clone();
+        let closing_barrier = barrier.clone();
+        let stop = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+            closing_barrier.wait();
+            runtime.block_on(closing.shutdown())
+        });
+        let starting = core.clone();
+        let starting_barrier = barrier.clone();
+        let run = std::thread::spawn(move || {
+            starting_barrier.wait();
+            let mut st = starting.lock();
+            // The production run admission check and registry insertion share
+            // this lock. No real program is needed to exercise the boundary.
+            crate::api::not_stopping(&st)?;
+            st.reg
+                .create(crate::terminals::NewTerminal { argv: vec!["fixture".into()], ..Default::default() }, now_ms())
+        });
+        barrier.wait();
+        let stopped = stop.join().unwrap().is_ok();
+        let admitted = run.join().unwrap().is_ok();
+        let st = core.lock();
+        assert_ne!(stopped, admitted, "shutdown or terminal admission must win, never both");
+        assert_eq!(st.stopping, stopped, "a denied shutdown must leave stopping unchanged");
+        assert_eq!(st.reg.terminals.values().any(|t| t.is_live()), admitted);
+        assert!(st.killing.is_empty());
+        drop(st);
+        drop(core);
+        remove_root(root);
+    }
+}
+
+#[tokio::test]
 async fn input_or_new_child_between_snapshot_and_ready_cancels_the_whole_close() {
     for add_child in [false, true] {
         let (core, root, ids) = close_fixture("wait");

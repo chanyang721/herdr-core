@@ -10,10 +10,13 @@ Windows GNU debug build, Rust 1.99.1, Zig 0.16.0, pinned ConPTY package
 
 - `cargo fmt --all --check`: passed.
 - `cargo clippy -p herdr-core --all-targets -- -D warnings`: passed.
-- Unit tests: 118 passed, including exact closure, kept subtrees, base36
+- Unit tests: 119 passed, including exact closure, kept subtrees, base36
   addresses, input/new-child races, helper bounds/deadlines, actual Exit evidence,
   durable lost-ACK recovery, signal-free reconciliation, no-signal cancellation,
   input epochs, journal write failure and unverified orphan retention.
+  A follow-up regression races new-terminal admission against shutdown 64 times:
+  stop may win and reject admission, or admission may win and leave a denied
+  stop's `stopping` flag false. The production fix already shares one state lock.
 - All-target test run: CLI docs 2, CLI examples 2, platform API 1, Windows 31
   passed. Two independently reproduced baseline failures were filtered below.
 - New Windows production-pipe tests use real disposable ConPTY shells: denial
