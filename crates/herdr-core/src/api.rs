@@ -84,10 +84,10 @@ methods! { Ctx<'_>;
     "terminal.kill_batch" => terminal_kill_batch, KillBatchParams => KillBatchResult,
         "Close an exact local batch through the configured transactional authorizer. No fallback.",
         errors ["close_denied", "close_retry_safe"];
-    "terminal.close_reconcile" => terminal_close_reconcile, CloseReconcileParams => serde_json::Value,
+    "terminal.close_reconcile" => terminal_close_reconcile, CloseReconcileParams => CloseReconcileResult,
         "Reconcile the exact original close operation without sending any termination signal.",
         errors ["close_denied"];
-    "terminal.close_snapshot" => terminal_close_snapshot, CloseSnapshotParams => serde_json::Value,
+    "terminal.close_snapshot" => terminal_close_snapshot, CloseSnapshotParams => CloseSnapshotResult,
         "Read canonical native identities and input generations, including retained exit witnesses. No close authorization.",
         errors ["close_denied"];
     "terminal.rm" => terminal_rm, TerminalParams => RemoveResult,
@@ -312,14 +312,15 @@ async fn terminal_kill_batch(core: Ctx<'_>, p: KillBatchParams) -> Result<KillBa
     Ok(result)
 }
 
-async fn terminal_close_reconcile(core: Ctx<'_>, p: CloseReconcileParams) -> Result<serde_json::Value, RpcError> {
+async fn terminal_close_reconcile(core: Ctx<'_>, p: CloseReconcileParams) -> Result<CloseReconcileResult, RpcError> {
     let result = core.close_reconcile(p.operation_id, p.roots, p.expected, p.context).await?;
     core.flush_saved().await?;
-    Ok(result)
+    serde_json::from_value(result).map_err(|e| RpcError::internal(format!("invalid native close receipt: {e}")))
 }
 
-async fn terminal_close_snapshot(core: Ctx<'_>, p: CloseSnapshotParams) -> Result<serde_json::Value, RpcError> {
-    core.close_snapshot(&p.roots)
+async fn terminal_close_snapshot(core: Ctx<'_>, p: CloseSnapshotParams) -> Result<CloseSnapshotResult, RpcError> {
+    serde_json::from_value(core.close_snapshot(&p.roots)?)
+        .map_err(|e| RpcError::internal(format!("invalid native close snapshot: {e}")))
 }
 
 async fn terminal_rm(core: Ctx<'_>, p: TerminalParams) -> Result<RemoveResult, RpcError> {

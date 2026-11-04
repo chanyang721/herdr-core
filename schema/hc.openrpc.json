@@ -36,6 +36,208 @@
         ],
         "type": "string"
       },
+      "CloseCancellation": {
+        "properties": {
+          "expected": {
+            "items": {
+              "$ref": "#/components/schemas/Identity"
+            },
+            "type": "array"
+          },
+          "no_signal": {
+            "type": "boolean"
+          },
+          "ok": {
+            "type": "boolean"
+          },
+          "operation_id": {
+            "type": "string"
+          },
+          "state": {
+            "$ref": "#/components/schemas/CloseCancellationState"
+          }
+        },
+        "required": [
+          "ok",
+          "operation_id",
+          "state",
+          "no_signal",
+          "expected"
+        ],
+        "type": "object"
+      },
+      "CloseCancellationState": {
+        "enum": [
+          "cancelled"
+        ],
+        "type": "string"
+      },
+      "CloseNativeState": {
+        "enum": [
+          "live",
+          "finished",
+          "unknown"
+        ],
+        "type": "string"
+      },
+      "CloseOperationOutcome": {
+        "enum": [
+          "cancelled",
+          "closed",
+          "no_signal_pending",
+          "awaiting_audit",
+          "exit_unobserved",
+          "pending"
+        ],
+        "type": "string"
+      },
+      "CloseReconcileResult": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/KillBatchResult"
+          },
+          {
+            "$ref": "#/components/schemas/CloseCancellation"
+          }
+        ]
+      },
+      "CloseSnapshotOperation": {
+        "properties": {
+          "acknowledged": {
+            "type": "boolean"
+          },
+          "cancelled": {
+            "type": "boolean"
+          },
+          "expected": {
+            "items": {
+              "$ref": "#/components/schemas/Identity"
+            },
+            "type": "array"
+          },
+          "operation_id": {
+            "type": "string"
+          },
+          "outcome": {
+            "$ref": "#/components/schemas/CloseOperationOutcome"
+          },
+          "roots": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "signalled": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "operation_id",
+          "roots",
+          "expected",
+          "acknowledged",
+          "signalled",
+          "cancelled",
+          "outcome"
+        ],
+        "type": "object"
+      },
+      "CloseSnapshotResult": {
+        "properties": {
+          "core_id": {
+            "type": "string"
+          },
+          "expected": {
+            "items": {
+              "$ref": "#/components/schemas/Identity"
+            },
+            "type": "array"
+          },
+          "operations": {
+            "items": {
+              "$ref": "#/components/schemas/CloseSnapshotOperation"
+            },
+            "type": "array"
+          },
+          "roots": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "targets": {
+            "items": {
+              "$ref": "#/components/schemas/CloseSnapshotTarget"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "core_id",
+          "roots",
+          "expected",
+          "targets",
+          "operations"
+        ],
+        "type": "object"
+      },
+      "CloseSnapshotTarget": {
+        "properties": {
+          "address": {
+            "type": "string"
+          },
+          "created_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "input_generation": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "native_state": {
+            "$ref": "#/components/schemas/CloseNativeState"
+          },
+          "non_agent_history": {
+            "type": "boolean"
+          },
+          "observed_exit": {
+            "type": "boolean"
+          },
+          "pid": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "program_started_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "status": {
+            "type": "string"
+          },
+          "turn": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "address",
+          "pid",
+          "created_ms",
+          "input_generation",
+          "program_started_ms",
+          "turn",
+          "status",
+          "non_agent_history",
+          "native_state",
+          "observed_exit"
+        ],
+        "type": "object"
+      },
       "CoreInfo": {
         "properties": {
           "id": {
@@ -2184,7 +2386,9 @@
       ],
       "result": {
         "name": "result",
-        "schema": true
+        "schema": {
+          "$ref": "#/components/schemas/CloseReconcileResult"
+        }
       }
     },
     {
@@ -2214,7 +2418,9 @@
       ],
       "result": {
         "name": "result",
-        "schema": true
+        "schema": {
+          "$ref": "#/components/schemas/CloseSnapshotResult"
+        }
       }
     },
     {
