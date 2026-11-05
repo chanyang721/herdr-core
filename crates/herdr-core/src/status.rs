@@ -62,6 +62,8 @@ impl Status {
 #[derive(Default, Debug, PartialEq)]
 pub struct Change {
     pub status: bool,
+    /// A fresh root report, not a child record or an unchanged recovery replay.
+    pub root_report: bool,
     pub turn_ended: bool,
     /// It just got stuck: blocked on the user or errored (wasn't that before).
     pub stuck: bool,
@@ -94,6 +96,8 @@ fn stamp(t: &mut Terminal, was: Option<String>) {
 }
 
 pub fn apply(t: &mut Terminal, r: &StatusReport) -> Change {
+    t.non_agent_history = false;
+    t.shell_exit_input.clear();
     let (was_working, was_word) = (working(t), word(t));
     let was = stuck(t).map(String::from);
     t.reported = true;
@@ -118,6 +122,7 @@ pub fn apply(t: &mut Terminal, r: &StatusReport) -> Change {
     stamp(t, was_word);
     Change {
         status: true,
+        root_report: r.id.is_empty(),
         turn_ended: end_turn(t, was_working),
         stuck: stuck(t).is_some() && stuck(t) != was.as_deref(),
     }
@@ -130,7 +135,7 @@ pub fn reset(t: &mut Terminal) -> Change {
     t.status = None;
     t.records.clear();
     stamp(t, was_word);
-    Change { status: had, turn_ended: end_turn(t, was_working), stuck: false }
+    Change { status: had, turn_ended: end_turn(t, was_working), ..Default::default() }
 }
 
 fn base64(bytes: &[u8]) -> String {

@@ -7,6 +7,7 @@ Terminals
   run <cmd|template> [task]   run it and wait like a shell (--bg: don't wait)
   ls                          list live terminals (--all: finished too)
   get <t>                     show one terminal
+  close-snapshot <t>          read native close identity and exit evidence
   attach [t]                  put this terminal on it (ctrl+\ detaches)
   read <t>                    print its screen and history
   kill <t>                    end its program

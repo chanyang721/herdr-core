@@ -77,6 +77,7 @@ struct State {
 }
 
 struct Holder {
+    guarded: bool,
     state: Mutex<State>,
     changed: Condvar,
     instance: String,
@@ -91,6 +92,7 @@ struct Holder {
 
 /// Runs a holder on `socket` (each holder has its own; the core picks the path).
 pub fn run(socket: std::path::PathBuf) -> io::Result<()> {
+    platform::raise_nofile_limit();
     let paths = Paths::from_env().map_err(|e| io::Error::other(e.message))?;
     paths.create_dirs()?;
     // A taken path means another holder lives there; a stale file is removed by the core.
@@ -100,6 +102,7 @@ pub fn run(socket: std::path::PathBuf) -> io::Result<()> {
         .and_then(|v| v.parse().ok())
         .map_or(Duration::from_secs(3), Duration::from_millis);
     let holder = Arc::new(Holder {
+        guarded: crate::config::load(&paths.config).map_err(|e| io::Error::other(e.message))?.close_guard.is_some(),
         state: Mutex::new(State {
             terms: HashMap::new(),
             core: None,
@@ -147,6 +150,9 @@ impl Holder {
 
     /// Ends everything carrying `scope`, in the background.
     fn sweep(self: &Arc<Self>, scope: Option<String>) {
+        if self.guarded {
+            return;
+        }
         let Some(scope) = scope else { return };
         self.sweeps.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let holder = self.clone();
@@ -430,7 +436,9 @@ impl Holder {
         // The terminal lived exactly as long as its program: what it left behind
         // goes too, before the exit is reported. If we die first, the core still
         // sees it live and ends what carries its scope itself.
-        if let Some(scope) = scope {
+        if !self.guarded
+            && let Some(scope) = scope
+        {
             self.sweeps.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             crate::sweep::sweep(&[scope]);
             self.sweeps.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);

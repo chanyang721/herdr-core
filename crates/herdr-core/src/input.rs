@@ -21,6 +21,7 @@ const SETTLE_MAX: Duration = Duration::from_secs(5);
 /// A person's typing, as it affects agent input to one terminal.
 #[derive(Default)]
 pub struct Gate {
+    pub(crate) generation: u64,
     last_human: Option<Instant>,
     /// An agent's input is going in right now: viewer input waits.
     busy: bool,
@@ -29,6 +30,9 @@ pub struct Gate {
 }
 
 impl Gate {
+    pub(crate) fn close_ready(&self) -> bool {
+        !self.busy && self.held.is_empty()
+    }
     /// A person pressed keys while an agent's input was going in.
     pub fn has_held(&self) -> bool {
         self.held_human
@@ -36,6 +40,7 @@ impl Gate {
 
     /// Starts or ends an agent's input; ending returns the viewer bytes held meanwhile.
     pub fn set_busy(&mut self, busy: bool) -> Vec<u8> {
+        self.generation = self.generation.wrapping_add(1);
         self.busy = busy;
         if busy {
             Vec::new()
@@ -48,6 +53,9 @@ impl Gate {
     /// Viewer bytes: straight through, or held while an agent types.
     /// Only human input resets the quiet period.
     pub fn viewer(&mut self, bytes: &[u8], human: bool) -> Vec<u8> {
+        if !bytes.is_empty() {
+            self.generation = self.generation.wrapping_add(1);
+        }
         if human {
             self.last_human = Some(Instant::now());
         }
@@ -62,8 +70,21 @@ impl Gate {
 }
 
 pub enum Step {
+    FirstTask(Vec<u8>),
     Write(Vec<u8>),
     Pause(Duration),
+}
+
+impl State {
+    pub(crate) fn note_input(&mut self, id: u32) -> Result<(), RpcError> {
+        let terminal =
+            self.reg.terminals.get_mut(&id).ok_or_else(|| crate::close_guard::denied("input target vanished"))?;
+        if terminal.input_generation as u32 == u32::MAX {
+            return Err(crate::close_guard::denied("input generation exhausted; restart required"));
+        }
+        terminal.input_generation += 1;
+        Ok(())
+    }
 }
 
 fn env_ms(var: &str, default: u64) -> Duration {
@@ -128,6 +149,9 @@ impl Core {
         }
         let (out, steps) = {
             let mut st = self.lock();
+            if st.close_inflight.contains(&id) {
+                return Err(crate::close_guard::denied("terminal close in progress"));
+            }
             let t = st.reg.terminals.get(&id).filter(|t| t.is_live()).ok_or_else(|| {
                 RpcError::new(
                     "finished",
@@ -137,11 +161,29 @@ impl Core {
             })?;
             t.check_program()?;
             let prepared = prepare(&st, t)?;
-            st.gates.entry(id).or_default().busy = true;
+            for step in &prepared.1 {
+                if let Step::Write(bytes) | Step::FirstTask(bytes) = step {
+                    st.reg.terminals.get_mut(&id).expect("input target").observe_shell_input(bytes);
+                }
+            }
+            st.note_input(id)?;
+            self.save_soon();
+            st.gates.entry(id).or_default().set_busy(true);
             prepared
         };
         for step in steps {
             match step {
+                Step::FirstTask(bytes) => {
+                    let mut st = self.lock();
+                    if st.link(id).is_some() {
+                        if let Some(t) = st.reg.terminals.get_mut(&id) {
+                            t.first_task_turn = Some(t.turn);
+                        }
+                        st.link(id).expect("delivery link").input(id, &bytes);
+                        self.save(&st);
+                        self.changed.notify_waiters();
+                    }
+                }
                 Step::Write(bytes) => {
                     if let Some(link) = self.lock().link(id) {
                         link.input(id, &bytes);
@@ -162,6 +204,21 @@ impl Core {
     /// Paste + Enter, after a person has paused typing. Refuses a blocked
     /// program (typing would answer its dialog) unless `force`.
     pub async fn send(&self, id: u32, text: &str, force: bool, only_if: Option<&str>) -> Result<Sent, RpcError> {
+        self.send_message(id, text, force, only_if, false).await
+    }
+
+    pub(crate) async fn send_first_task(&self, id: u32, text: &str) -> Result<Sent, RpcError> {
+        self.send_message(id, text, false, None, true).await
+    }
+
+    async fn send_message(
+        &self,
+        id: u32,
+        text: &str,
+        force: bool,
+        only_if: Option<&str>,
+        first_task: bool,
+    ) -> Result<Sent, RpcError> {
         if let Some(t) = self.lock().reg.terminals.get(&id) {
             t.check_program()?;
         }
@@ -203,8 +260,9 @@ impl Core {
                     None => b"\r".to_vec(),
                 };
                 let gap = t.paste_gap_ms.map_or(PASTE_GAP, Duration::from_millis);
-                let steps =
-                    vec![Step::Write(paste(screen.dec_mode(2004), text)), Step::Pause(gap), Step::Write(submit)];
+                let bytes = paste(screen.dec_mode(2004), text);
+                let paste = if first_task { Step::FirstTask(bytes) } else { Step::Write(bytes) };
+                let steps = vec![paste, Step::Pause(gap), Step::Write(submit)];
                 Ok(((word, t.turn, t.reported), steps))
             })
             .await?;

@@ -8,7 +8,7 @@ use tokio::sync::watch;
 
 pub(super) struct RegistryWriter {
     queue: Arc<(Mutex<Pending>, Condvar)>,
-    completed: watch::Receiver<u64>,
+    completed: watch::Receiver<(u64, Option<String>)>,
     worker: Option<JoinHandle<()>>,
 }
 
@@ -26,7 +26,7 @@ impl RegistryWriter {
 
     pub(super) fn start(mut write: impl FnMut(&[u8]) -> io::Result<()> + Send + 'static) -> io::Result<Self> {
         let queue = Arc::new((Mutex::new(Pending::default()), Condvar::new()));
-        let (done, completed) = watch::channel(0);
+        let (done, completed) = watch::channel((0, None));
         let work = queue.clone();
         let worker = std::thread::Builder::new().name("registry-writer".into()).spawn(move || {
             let (mutex, changed) = &*work;
@@ -34,10 +34,11 @@ impl RegistryWriter {
             loop {
                 if let Some((version, bytes)) = pending.latest.take() {
                     drop(pending);
-                    if let Err(e) = write(&bytes) {
+                    let error = write(&bytes).err().map(|e| e.to_string());
+                    if let Some(e) = &error {
                         eprintln!("core: cannot save terminals: {e}");
                     }
-                    done.send_replace(version);
+                    done.send_replace((version, error));
                     pending = mutex.lock().unwrap();
                 } else if pending.closed {
                     break;
@@ -63,10 +64,25 @@ impl RegistryWriter {
         let version = self.queue.0.lock().unwrap().submitted;
         let mut completed = self.completed.clone();
         completed
-            .wait_for(|written| *written >= version)
+            .wait_for(|(written, _)| *written >= version)
             .await
             .map_err(|_| io::Error::other("registry writer stopped"))?;
         Ok(())
+    }
+
+    /// Transactional signal intent requires successful persistence, unlike the
+    /// legacy completion barrier which deliberately tolerates failed writes.
+    pub async fn flush_durable(&self) -> io::Result<()> {
+        let version = self.queue.0.lock().unwrap().submitted;
+        let mut completed = self.completed.clone();
+        let outcome = completed
+            .wait_for(|(written, _)| *written >= version)
+            .await
+            .map_err(|_| io::Error::other("registry writer stopped"))?;
+        match &outcome.1 {
+            Some(error) => Err(io::Error::other(error.clone())),
+            None => Ok(()),
+        }
     }
 }
 
@@ -172,5 +188,6 @@ mod tests {
         release.send(()).unwrap();
         writer.flush().await.unwrap();
         writer.flush().await.unwrap();
+        assert!(writer.flush_durable().await.is_err(), "a failed write cannot authorize a signal");
     }
 }

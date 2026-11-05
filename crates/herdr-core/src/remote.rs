@@ -673,23 +673,23 @@ pub fn orphaned_afar(core: &Core, st: &mut State, parent: u32) {
 /// From a peer: its terminal `parent` finished. Children here that asked to
 /// die with it end.
 pub async fn orphaned(core: &Arc<Core>, conn: Option<&Arc<Conn>>, params: &Value) -> Result<Value, RpcError> {
+    if core.close_guard.is_some() {
+        return Err(crate::close_guard::denied("remote automatic close is unsupported"));
+    }
     let from_peer = conn.is_some_and(|c| core.lock().peer_lines.values().any(|(k, _)| *k == conn_key(c)));
     let Some(address) = params["parent"].as_str().filter(|_| from_peer).and_then(|p| peer_address(core, p)) else {
         return Err(RpcError::new("denied", "only a core that dialed in says its terminals finished", ""));
     };
     let kids: Vec<u32> = {
-        let mut st = core.lock();
-        let kids: Vec<u32> = st
-            .reg
+        let st = core.lock();
+        st.reg
             .terminals
             .values()
             .filter(|t| t.is_live() && t.die_with_parent && t.parent.as_deref() == Some(address.as_str()))
             .map(|t| t.id())
-            .collect();
-        st.killing.extend(&kids);
-        kids
+            .collect()
     };
-    core.kill(&kids).await;
+    core.kill(&kids).await?;
     Ok(json!({}))
 }
 
@@ -1026,5 +1026,14 @@ fn localize_in(core: &Core, st: &State, name: &str, aliases: &[&str], mut v: Val
         },
     };
     map_addresses(&mut v, &map);
+    if v["type"] == "message_sent"
+        && let Some(data) = v.get_mut("data").and_then(Value::as_object_mut)
+    {
+        for key in ["source", "target"] {
+            if let Some(Value::String(s)) = data.get_mut(key) {
+                *s = map(s);
+            }
+        }
+    }
     v
 }

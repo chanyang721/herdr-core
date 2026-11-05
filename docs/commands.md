@@ -17,6 +17,7 @@ Terminals
   run <cmd|template> [task]   run it and wait like a shell (--bg: don't wait)
   ls                          list live terminals (--all: finished too)
   get <t>                     show one terminal
+  close-snapshot <t>          read native close identity and exit evidence
   attach [t]                  put this terminal on it (ctrl+\ detaches)
   read <t>                    print its screen and history
   kill <t>                    end its program
@@ -84,6 +85,21 @@ Options:
       --observe            Watch only: never type or resize
       --history <HISTORY>  Scrollback lines to show first (main screen only) [default: 0]
   -h, --help               Print help
+```
+
+## hc close-snapshot
+
+```text
+Read a terminal's native close identity and generation; never sends a signal
+
+Usage: hc close-snapshot [OPTIONS] <TERMINAL>
+
+Arguments:
+  <TERMINAL>  The canonical local terminal address
+
+Options:
+      --json  JSON output even in a terminal
+  -h, --help  Print help
 ```
 
 ## hc connect
@@ -638,7 +654,7 @@ Options:
       --children <CHILDREN>
           Wait on children instead: all = until none is working, any = next news or a message to you.
           
-          `all`: until none of the children is working (one that hasn't reported yet counts as working). `any`: the parent's unseen news (a turn ended, it blocked, it hit an error, it exited), else the next child to stop working; for the parent itself, also a message typed into it while it worked (reason `message`).
+          `all`: until none of the children is working (one that hasn't reported yet counts as working). `any`: the parent's unseen news (a turn ended, it blocked, it hit an error, it exited), else the next child to stop working; for the parent itself, also a message typed into it while it worked (reason `message`). A child with a sent launch task counts as working until its turn advances past delivery, or it reports done, blocked, error, or exits. Startup idle does not complete that task in either mode. Without a launch task, idle still counts as stopped.
           
           [possible values: any, all]
 
