@@ -57,6 +57,11 @@ fn can_take_note(t: &Terminal) -> bool {
     t.is_live() && t.reported && !blocked(t)
 }
 
+fn note_submit(screen: &ghostty_vt::Terminal, key: Option<&str>) -> Result<Vec<u8>, RpcError> {
+    // A bad persisted template key must not leave notifications retrying forever.
+    crate::keys::encode(screen, key.unwrap_or("enter")).or_else(|_| crate::keys::encode(screen, "enter"))
+}
+
 /// `t7 reviewer`: address, then name or template.
 pub fn who(t: &Terminal) -> String {
     match t.name.as_ref().or(t.template.as_ref()) {
@@ -276,7 +281,7 @@ impl Core {
                     kids.iter().map(|id| self.note_for(st, *id, &st.reg.terminals[id].address)).collect();
                 text.extend(afar.iter().cloned());
                 let screen = st.screens.get(&parent).expect("live terminal has a screen");
-                let submit = crate::keys::encode(screen, t.submit.as_deref().unwrap_or("enter"))?;
+                let submit = note_submit(screen, t.submit.as_deref())?;
                 let told = kids.iter().map(|id| (*id, st.reg.terminals[id].news)).collect();
                 let steps = vec![
                     Step::Write(paste(screen.dec_mode(2004), &text.join("\n"))),
@@ -311,6 +316,15 @@ impl Core {
 mod tests {
     use super::*;
     use crate::terminals::{NewTerminal, Registry};
+
+    #[test]
+    fn invalid_submit_falls_back_to_enter_in_the_active_keyboard_mode() {
+        let mut screen = ghostty_vt::Terminal::new(80, 24, 1 << 20);
+        assert_eq!(note_submit(&screen, Some("not-a-key")).unwrap(), b"\r");
+        screen.write(b"\x1b[>8u");
+        assert_eq!(note_submit(&screen, Some("hyper+x")).unwrap(), b"\x1b[13u");
+        assert_eq!(note_submit(&screen, Some("tab")).unwrap(), b"\x1b[9u");
+    }
 
     #[test]
     fn notes_say_what_happened_and_where_to_look() {

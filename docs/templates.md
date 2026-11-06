@@ -56,6 +56,8 @@ The header is a small line-based format, not full YAML:
 Values are literal text after the first colon, trimmed at each end.
 Do not add YAML quotes around them or use multiline YAML values.
 Unknown fields are ignored.
+Parent notifications use `submit` too. If that key is invalid, notifications
+fall back to Enter so an invalid template cannot prevent delivery.
 The body is the agent's opening instructions. Core appends your task after a blank line.
 The command runs through `sh`, which must be on PATH on Windows too.
 
