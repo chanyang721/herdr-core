@@ -65,6 +65,11 @@ hc read --lines 100 review          # screen plus history; waits return status o
 hc interrupt review                # stop its current turn, not the process
 ```
 
+`send` separates the paste from a mode-aware Enter. `started` observes
+status, not the input box; an already
+working program is not an acknowledgement of your message. Do not blindly
+send another Enter: it could submit a person's draft.
+
 In human-readable output, `ls` shows the `where` label or the current folder;
 `get` shows the full current folder. Both fall back to the launch folder when
 it is unknown. JSON keeps `cwd` as the launch folder; `get` also includes the
