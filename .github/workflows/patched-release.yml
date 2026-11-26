@@ -1,0 +1,118 @@
+# 초안: 포크(chanyang721/herdr-core)에만 둘 워크플로. 아직 포크에 올리지 않았다.
+# 넣을 곳: 포크 브랜치 patched/vX.Y.Z 의 .github/workflows/patched-release.yml (repatch 결과 위 별도 커밋)
+# 이름이 v* 가 아닌 태그(core-vX.Y.Z-pN)에서만 돈다: 업스트림 release.yml(v* 태그)은 건드리지 않는다.
+# 산출물: Windows zip, macOS(aarch64) tar.gz(ad-hoc 서명 "Herdr Core.app"), SHA256SUMS
+# 게시 경로는 태그 push(core-v*) 하나뿐이다. 수동 실행(workflow_dispatch)은 빌드 확인용이며
+# 릴리즈를 게시하지 않는다(산출물은 Actions artifact 로 7일만 남는다).
+# 모든 잡은 포크(chanyang721/herdr-core)에서만 돈다.
+# 공개 레포라 Actions 분(macOS 포함)은 무료. 쓰기 권한은 release 잡의 contents: write 하나뿐.
+name: patched-release
+
+on:
+  push:
+    tags: ["core-v*"]
+  workflow_dispatch: # 빌드 확인용: 게시하지 않는다
+
+permissions:
+  contents: read
+
+concurrency:
+  group: patched-release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  RUST_TOOLCHAIN: 1.95.0
+
+jobs:
+  build:
+    name: build (tag push publishes; manual run is a build check only)
+    if: github.repository == 'chanyang721/herdr-core'
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - { name: windows-x86_64, target: x86_64-pc-windows-msvc, runner: windows-2022 }
+          - { name: macos-aarch64, target: aarch64-apple-darwin, runner: macos-15 }
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: true
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: ${{ matrix.target }}
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.16.0
+      - name: Patch is present
+        run: grep -qF 'doc, message_sent)' crates/herdr-core/src/api.rs
+      - name: Tests that cover the patch
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          scripts/fetch-conpty.ps1 -Dest target/debug
+          cargo test --locked -p herdr-core --test windows send_observation
+      - name: Tests that cover the patch (macOS)
+        if: runner.os == 'macOS'
+        run: cargo test --locked -p herdr-core --test m4 -- a_send_is_observed plain_shell_sends_have_no_terminal_sender
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }} -p herdr-core
+      - name: Bundle and ad-hoc sign (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          sh scripts/mac-bundle target/${{ matrix.target }}/release/herdr-core 'target/${{ matrix.target }}/release/Herdr Core.app'
+          scripts/mac-sign 'target/${{ matrix.target }}/release/Herdr Core.app'
+          scripts/mac-sign 'target/${{ matrix.target }}/release/herdr-core'
+          mkdir -p dist
+          sh scripts/package 'target/${{ matrix.target }}/release/Herdr Core.app' dist/herdr-core-${{ matrix.name }}.tar.gz
+      - name: Pack (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $bin = "target/${{ matrix.target }}/release/herdr-core.exe"
+          & $bin --version; if ($LASTEXITCODE) { throw "it does not run" }
+          New-Item -ItemType Directory -Force stage/THIRD-PARTY-NOTICES, dist | Out-Null
+          Copy-Item $bin stage/
+          Copy-Item LICENSE stage/
+          Copy-Item crates/herdr-core/THIRD-PARTY-NOTICES stage/THIRD-PARTY-NOTICES/herdr-core.txt
+          scripts/fetch-conpty.ps1 -Dest stage
+          Copy-Item distribution/windows/* stage/THIRD-PARTY-NOTICES/
+          tar -a -cf dist/herdr-core-${{ matrix.name }}.zip -C stage herdr-core.exe conpty LICENSE THIRD-PARTY-NOTICES
+          if ($LASTEXITCODE) { throw "zip failed" }
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: herdr-core-${{ matrix.name }}
+          path: dist/herdr-core-${{ matrix.name }}.*
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    needs: build
+    # 게시는 core-v* 태그 push 에서만.
+    if: >-
+      github.repository == 'chanyang721/herdr-core'
+      && github.event_name == 'push' && github.ref_type == 'tag' && startsWith(github.ref_name, 'core-v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        run: cd dist && sha256sum herdr-core-* > SHA256SUMS && cat SHA256SUMS
+      - name: Publish the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          gh release create "$TAG" dist/* --repo "$REPO" --target "$SHA" --title "$TAG" --notes "herdr-core $TAG, upstream tag plus the patches in patches.txt (commit $SHA)"
