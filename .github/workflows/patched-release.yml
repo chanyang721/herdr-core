@@ -114,4 +114,5 @@ jobs:
           TAG: ${{ github.ref_name }}
           REPO: ${{ github.repository }}
           SHA: ${{ github.sha }}
-        run: gh release create "$TAG" dist/* --repo "$REPO" --target "$SHA" --title "$TAG" --notes "herdr-core $TAG: upstream tag plus the patches in patches.txt (commit $SHA)"
+        run: |
+          gh release create "$TAG" dist/* --repo "$REPO" --target "$SHA" --title "$TAG" --notes "herdr-core $TAG, upstream tag plus the patches in patches.txt (commit $SHA)"
