@@ -36,6 +36,208 @@
         ],
         "type": "string"
       },
+      "CloseCancellation": {
+        "properties": {
+          "expected": {
+            "items": {
+              "$ref": "#/components/schemas/Identity"
+            },
+            "type": "array"
+          },
+          "no_signal": {
+            "type": "boolean"
+          },
+          "ok": {
+            "type": "boolean"
+          },
+          "operation_id": {
+            "type": "string"
+          },
+          "state": {
+            "$ref": "#/components/schemas/CloseCancellationState"
+          }
+        },
+        "required": [
+          "ok",
+          "operation_id",
+          "state",
+          "no_signal",
+          "expected"
+        ],
+        "type": "object"
+      },
+      "CloseCancellationState": {
+        "enum": [
+          "cancelled"
+        ],
+        "type": "string"
+      },
+      "CloseNativeState": {
+        "enum": [
+          "live",
+          "finished",
+          "unknown"
+        ],
+        "type": "string"
+      },
+      "CloseOperationOutcome": {
+        "enum": [
+          "cancelled",
+          "closed",
+          "no_signal_pending",
+          "awaiting_audit",
+          "exit_unobserved",
+          "pending"
+        ],
+        "type": "string"
+      },
+      "CloseReconcileResult": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/KillBatchResult"
+          },
+          {
+            "$ref": "#/components/schemas/CloseCancellation"
+          }
+        ]
+      },
+      "CloseSnapshotOperation": {
+        "properties": {
+          "acknowledged": {
+            "type": "boolean"
+          },
+          "cancelled": {
+            "type": "boolean"
+          },
+          "expected": {
+            "items": {
+              "$ref": "#/components/schemas/Identity"
+            },
+            "type": "array"
+          },
+          "operation_id": {
+            "type": "string"
+          },
+          "outcome": {
+            "$ref": "#/components/schemas/CloseOperationOutcome"
+          },
+          "roots": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "signalled": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "operation_id",
+          "roots",
+          "expected",
+          "acknowledged",
+          "signalled",
+          "cancelled",
+          "outcome"
+        ],
+        "type": "object"
+      },
+      "CloseSnapshotResult": {
+        "properties": {
+          "core_id": {
+            "type": "string"
+          },
+          "expected": {
+            "items": {
+              "$ref": "#/components/schemas/Identity"
+            },
+            "type": "array"
+          },
+          "operations": {
+            "items": {
+              "$ref": "#/components/schemas/CloseSnapshotOperation"
+            },
+            "type": "array"
+          },
+          "roots": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "targets": {
+            "items": {
+              "$ref": "#/components/schemas/CloseSnapshotTarget"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "core_id",
+          "roots",
+          "expected",
+          "targets",
+          "operations"
+        ],
+        "type": "object"
+      },
+      "CloseSnapshotTarget": {
+        "properties": {
+          "address": {
+            "type": "string"
+          },
+          "created_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "input_generation": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "native_state": {
+            "$ref": "#/components/schemas/CloseNativeState"
+          },
+          "non_agent_history": {
+            "type": "boolean"
+          },
+          "observed_exit": {
+            "type": "boolean"
+          },
+          "pid": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "program_started_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "status": {
+            "type": "string"
+          },
+          "turn": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "address",
+          "pid",
+          "created_ms",
+          "input_generation",
+          "program_started_ms",
+          "turn",
+          "status",
+          "non_agent_history",
+          "native_state",
+          "observed_exit"
+        ],
+        "type": "object"
+      },
       "CoreInfo": {
         "properties": {
           "id": {
@@ -371,6 +573,29 @@
         ],
         "type": "object"
       },
+      "Identity": {
+        "properties": {
+          "address": {
+            "type": "string"
+          },
+          "created_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "pid": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "address",
+          "pid",
+          "created_ms"
+        ],
+        "type": "object"
+      },
       "IdleOrWorking": {
         "enum": [
           "idle",
@@ -434,6 +659,28 @@
         },
         "required": [
           "turn"
+        ],
+        "type": "object"
+      },
+      "KillBatchResult": {
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "operation_id": {
+            "type": "string"
+          },
+          "terminated": {
+            "items": {
+              "$ref": "#/components/schemas/Identity"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "ok",
+          "operation_id",
+          "terminated"
         ],
         "type": "object"
       },
@@ -728,6 +975,12 @@
             "default": "",
             "description": "Which terminal the program believes it runs in (TERM_PROGRAM and\nversion), fixed at start; XTVERSION answers with it.",
             "type": "string"
+          },
+          "input_generation": {
+            "default": 0,
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
           },
           "keep": {
             "default": false,
@@ -1176,6 +1429,17 @@
               "null"
             ]
           },
+          "first_message": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/FirstMessage"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "A template first message that was not sent; retained for later inspection."
+          },
           "foreground": {
             "anyOf": [
               {
@@ -1191,6 +1455,12 @@
             "default": "",
             "description": "Which terminal the program believes it runs in (TERM_PROGRAM and\nversion), fixed at start; XTVERSION answers with it.",
             "type": "string"
+          },
+          "input_generation": {
+            "default": 0,
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
           },
           "keep": {
             "default": false,
@@ -1422,7 +1692,7 @@
       "name": "Apache-2.0"
     },
     "title": "herdr-core",
-    "version": "0.1.17"
+    "version": "0.1.18"
   },
   "methods": [
     {
@@ -1659,6 +1929,22 @@
             "default": false,
             "description": "Ignored: children end with their parent unless `outlive_parent`.",
             "type": "boolean"
+          }
+        },
+        {
+          "description": "The caller's colors and cell size, answering the program's display queries\nfrom its start. Omitted: Ghostty's defaults until a viewer attaches.",
+          "name": "display",
+          "required": false,
+          "schema": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Display"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The caller's colors and cell size, answering the program's display queries\nfrom its start. Omitted: Ghostty's defaults until a viewer attaches."
           }
         },
         {
@@ -1979,6 +2265,161 @@
         "name": "result",
         "schema": {
           "$ref": "#/components/schemas/Terminal"
+        }
+      }
+    },
+    {
+      "description": "Close an exact local batch through the configured transactional authorizer. No fallback.",
+      "errors": [
+        {
+          "code": -32000,
+          "data": {
+            "kind": "close_denied"
+          },
+          "message": "close_denied"
+        },
+        {
+          "code": -32000,
+          "data": {
+            "kind": "close_retry_safe"
+          },
+          "message": "close_retry_safe"
+        }
+      ],
+      "name": "terminal.kill_batch",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "name": "context",
+          "required": false,
+          "schema": {
+            "default": null
+          }
+        },
+        {
+          "name": "expected",
+          "required": true,
+          "schema": {
+            "items": {
+              "$ref": "#/components/schemas/Identity"
+            },
+            "type": "array"
+          }
+        },
+        {
+          "name": "operation_id",
+          "required": false,
+          "schema": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        {
+          "name": "roots",
+          "required": true,
+          "schema": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "#/components/schemas/KillBatchResult"
+        }
+      }
+    },
+    {
+      "description": "Reconcile the exact original close operation without sending any termination signal.",
+      "errors": [
+        {
+          "code": -32000,
+          "data": {
+            "kind": "close_denied"
+          },
+          "message": "close_denied"
+        }
+      ],
+      "name": "terminal.close_reconcile",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "name": "context",
+          "required": false,
+          "schema": {
+            "default": null
+          }
+        },
+        {
+          "name": "expected",
+          "required": true,
+          "schema": {
+            "items": {
+              "$ref": "#/components/schemas/Identity"
+            },
+            "type": "array"
+          }
+        },
+        {
+          "name": "operation_id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "roots",
+          "required": true,
+          "schema": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "#/components/schemas/CloseReconcileResult"
+        }
+      }
+    },
+    {
+      "description": "Read canonical native identities and input generations, including retained exit witnesses. No close authorization.",
+      "errors": [
+        {
+          "code": -32000,
+          "data": {
+            "kind": "close_denied"
+          },
+          "message": "close_denied"
+        }
+      ],
+      "name": "terminal.close_snapshot",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "name": "roots",
+          "required": true,
+          "schema": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "#/components/schemas/CloseSnapshotResult"
         }
       }
     },
@@ -2559,7 +3000,7 @@
           }
         },
         {
-          "description": "Wait on children instead: all = until none is working, any = next news or a message to you.\n\n`all`: until none of the children is working (one that hasn't reported\nyet counts as working). `any`: the parent's unseen news (a turn ended, it\nblocked, it hit an error, it exited), else the next child to stop working; for the parent\nitself, also a message typed into it while it worked (reason `message`).",
+          "description": "Wait on children instead: all = until none is working, any = next news or a message to you.\n\n`all`: until none of the children is working (one that hasn't reported\nyet counts as working). `any`: the parent's unseen news (a turn ended, it\nblocked, it hit an error, it exited), else the next child to stop working; for the parent\nitself, also a message typed into it while it worked (reason `message`).\nA child with a sent launch task counts as working until its turn advances\npast delivery, or it reports done, blocked, error, or exits. Startup idle\ndoes not complete that task in either mode. Without a launch task, idle\nstill counts as stopped.",
           "name": "children",
           "required": false,
           "schema": {
@@ -2571,7 +3012,7 @@
                 "type": "null"
               }
             ],
-            "description": "Wait on children instead: all = until none is working, any = next news or a message to you.\n\n`all`: until none of the children is working (one that hasn't reported\nyet counts as working). `any`: the parent's unseen news (a turn ended, it\nblocked, it hit an error, it exited), else the next child to stop working; for the parent\nitself, also a message typed into it while it worked (reason `message`)."
+            "description": "Wait on children instead: all = until none is working, any = next news or a message to you.\n\n`all`: until none of the children is working (one that hasn't reported\nyet counts as working). `any`: the parent's unseen news (a turn ended, it\nblocked, it hit an error, it exited), else the next child to stop working; for the parent\nitself, also a message typed into it while it worked (reason `message`).\nA child with a sent launch task counts as working until its turn advances\npast delivery, or it reports done, blocked, error, or exits. Startup idle\ndoes not complete that task in either mode. Without a launch task, idle\nstill counts as stopped."
           }
         },
         {

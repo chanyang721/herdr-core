@@ -207,21 +207,25 @@ impl Core {
                 Job::Orphaned(parent) => {
                     let address = crate::terminals::address(parent);
                     let kids: Vec<u32> = {
-                        let mut st = self.lock();
-                        let kids: Vec<u32> = st
-                            .reg
+                        let st = self.lock();
+                        st.reg
                             .terminals
                             .values()
                             .filter(|t| {
-                                t.is_live() && t.die_with_parent && t.parent.as_deref() == Some(address.as_str())
+                                t.is_live()
+                                    && t.die_with_parent
+                                    && t.parent.as_deref() == Some(address.as_str())
+                                    && !(self.close_guard.is_some() && t.keep && t.labels.contains_key("herdr.space"))
                             })
                             .map(Terminal::id)
-                            .collect();
-                        st.killing.extend(&kids);
-                        kids
+                            .collect()
                     };
                     let core = self.clone();
-                    tokio::spawn(async move { core.kill(&kids).await });
+                    tokio::spawn(async move {
+                        if let Err(e) = core.kill(&kids).await {
+                            eprintln!("core: child close denied: {}", e.message);
+                        }
+                    });
                 }
             }
         }

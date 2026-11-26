@@ -6,6 +6,8 @@ use std::path::Path;
 
 #[derive(Deserialize, Default)]
 pub struct Config {
+    /// Transactional close authorizer, fixed at core startup.
+    pub close_guard: Option<Vec<String>>,
     /// Executable and arguments for new shells (default: this machine's shell).
     pub shell: Option<Vec<String>>,
     /// The chord that detaches `hc attach`: `ctrl+<key>`, default `ctrl+\`.

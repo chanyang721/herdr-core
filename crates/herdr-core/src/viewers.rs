@@ -42,6 +42,13 @@ pub struct Viewer {
     pub(crate) recovering: bool,
 }
 
+impl Display {
+    /// Answer the program's color and cell-size queries with these facts.
+    pub(crate) fn apply(&self, screen: &mut ghostty_vt::Terminal) {
+        screen.set_display(rgb(&self.fg), rgb(&self.bg), rgb(&self.cursor), self.cell.map(|[w, h]| (w, h)));
+    }
+}
+
 fn rgb(hex: &Option<String>) -> Option<Rgb> {
     let hex = hex.as_deref()?.strip_prefix('#')?;
     let n = u32::from_str_radix(hex, 16).ok().filter(|_| hex.len() == 6)?;
@@ -199,7 +206,15 @@ impl Core {
     }
 
     pub fn status_changed(&self, st: &mut State, id: u32, change: crate::status::Change) {
-        let t = &st.reg.terminals[&id];
+        let t = st.reg.terminals.get_mut(&id).expect("reported terminal");
+        let first_task_finished = t.first_task_turn.is_some_and(|turn| {
+            t.turn > turn
+                || (change.root_report
+                    && t.status.as_ref().is_some_and(|s| matches!(s.state.as_str(), "done" | "blocked" | "error")))
+        });
+        if first_task_finished {
+            t.first_task_turn = None;
+        }
         let (status, records, turn, reported) = (t.status.clone(), t.records.clone(), t.turn, t.reported);
         if change.status {
             self.emit(
@@ -213,7 +228,7 @@ impl Core {
             let state = status.map(|s| s.state);
             self.emit(st, "turn", id, serde_json::json!({"turn": turn, "state": state}));
         }
-        if (change.turn_ended || change.stuck) && st.reg.terminals[&id].is_live() {
+        if (change.turn_ended || change.stuck || first_task_finished) && st.reg.terminals[&id].is_live() {
             self.news(st, id);
         }
     }
@@ -245,6 +260,14 @@ impl Core {
         };
         if let Some(id) = id {
             let now = st.gates.entry(id).or_default().viewer(bytes, !automatic);
+            if st.close_inflight.contains(&id) {
+                return;
+            }
+            if st.note_input(id).is_err() {
+                return;
+            }
+            st.reg.terminals.get_mut(&id).expect("input target").observe_shell_input(bytes);
+            self.save_soon();
             if let Some(link) = st.link(id) {
                 link.input(id, &now);
             }
@@ -277,11 +300,15 @@ impl Core {
     /// Focus changes count as activity, and reach programs that asked for them.
     pub fn viewer_focus(&self, conn: &Arc<Conn>, channel: u32, focused: bool) {
         let mut st = self.lock();
+        st.policy_generation = st.policy_generation.wrapping_add(1);
         let id = if focused {
             self.touch(&mut st, conn, channel, |_| {})
         } else {
             Self::viewer(&mut st, conn, channel).filter(|(_, v)| !v.observe).map(|(id, _)| id)
         };
+        if id.is_some_and(|id| st.close_inflight.contains(&id)) {
+            return;
+        }
         if let Some(id) = id
             && st.screens.get(&id).is_some_and(|s| s.dec_mode(1004))
             && let Some(link) = st.link(id)
@@ -368,7 +395,7 @@ impl Core {
     fn apply_display(&self, st: &mut State, id: u32, display: Option<&Display>) {
         let Some(screen) = st.screens.get_mut(&id) else { return };
         if let Some(d) = display {
-            screen.set_display(rgb(&d.fg), rgb(&d.bg), rgb(&d.cursor), d.cell.map(|[w, h]| (w, h)));
+            d.apply(screen);
         }
         // Display changes can notify an idle program, even without a resize or output.
         let replies = Relay::take_responses(screen);

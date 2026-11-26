@@ -3,6 +3,8 @@ pub mod api;
 pub mod attach;
 pub mod cli;
 pub mod client;
+mod close_guard;
+pub mod close_guard_plan;
 pub mod config;
 pub mod events;
 pub mod exec;

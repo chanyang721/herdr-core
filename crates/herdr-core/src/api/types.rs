@@ -20,6 +20,141 @@ pub struct CoreInfo {
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct Empty {}
 
+#[derive(Deserialize, JsonSchema)]
+pub struct KillBatchParams {
+    #[serde(default)]
+    pub operation_id: Option<String>,
+    pub roots: Vec<String>,
+    pub expected: Vec<crate::close_guard_plan::Identity>,
+    #[serde(default)]
+    pub context: serde_json::Value,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Debug)]
+pub struct KillBatchResult {
+    pub ok: bool,
+    pub operation_id: String,
+    pub terminated: Vec<crate::close_guard_plan::Identity>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum CloseReconcileResult {
+    Closed(KillBatchResult),
+    Cancelled(CloseCancellation),
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct CloseCancellation {
+    pub ok: bool,
+    pub operation_id: String,
+    pub state: CloseCancellationState,
+    pub no_signal: bool,
+    pub expected: Vec<crate::close_guard_plan::Identity>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CloseCancellationState {
+    Cancelled,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct CloseSnapshotResult {
+    pub core_id: String,
+    pub roots: Vec<String>,
+    pub expected: Vec<crate::close_guard_plan::Identity>,
+    pub targets: Vec<CloseSnapshotTarget>,
+    pub operations: Vec<CloseSnapshotOperation>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct CloseSnapshotTarget {
+    #[serde(flatten)]
+    pub identity: crate::close_guard_plan::Identity,
+    pub input_generation: u64,
+    pub program_started_ms: u64,
+    pub turn: u64,
+    pub status: String,
+    pub non_agent_history: bool,
+    pub native_state: CloseNativeState,
+    pub observed_exit: bool,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CloseNativeState {
+    Live,
+    Finished,
+    Unknown,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct CloseSnapshotOperation {
+    pub operation_id: String,
+    pub roots: Vec<String>,
+    pub expected: Vec<crate::close_guard_plan::Identity>,
+    pub acknowledged: bool,
+    pub signalled: bool,
+    pub cancelled: bool,
+    pub outcome: CloseOperationOutcome,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CloseOperationOutcome {
+    Cancelled,
+    Closed,
+    NoSignalPending,
+    AwaitingAudit,
+    ExitUnobserved,
+    Pending,
+}
+
+#[cfg(test)]
+mod close_result_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn close_result_schemas_are_explicit_and_wire_receipts_remain_distinct() {
+        let schema = crate::api::openrpc();
+        for name in ["terminal.kill_batch", "terminal.close_reconcile", "terminal.close_snapshot"] {
+            let method = schema["methods"].as_array().unwrap().iter().find(|m| m["name"] == name).unwrap();
+            assert!(method["result"]["schema"].is_object(), "{name} must expose an explicit result schema");
+        }
+        let identity = json!({"address":"t1s","pid":123,"created_ms":456});
+        for wire in [
+            json!({"ok":true,"operation_id":"op","terminated":[identity]}),
+            json!({"ok":false,"operation_id":"op","state":"cancelled","no_signal":true,"expected":[identity]}),
+        ] {
+            let receipt: CloseReconcileResult = serde_json::from_value(wire.clone()).unwrap();
+            assert_eq!(serde_json::to_value(receipt).unwrap(), wire);
+        }
+        let wire = json!({"core_id":"machine","roots":["t1s"],"expected":[identity],
+            "targets":[{"address":"t1s","pid":123,"created_ms":456,"input_generation":1,"program_started_ms":2,
+            "turn":0,"status":"finished","non_agent_history":false,"native_state":"unknown","observed_exit":false}],
+            "operations":[{"operation_id":"op","roots":["t1s"],"expected":[identity],"acknowledged":false,
+            "signalled":true,"cancelled":false,"outcome":"exit_unobserved"}]});
+        let snapshot: CloseSnapshotResult = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(serde_json::to_value(snapshot).unwrap(), wire);
+    }
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct CloseReconcileParams {
+    pub operation_id: String,
+    pub roots: Vec<String>,
+    pub expected: Vec<crate::close_guard_plan::Identity>,
+    #[serde(default)]
+    pub context: serde_json::Value,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct CloseSnapshotParams {
+    pub roots: Vec<String>,
+}
+
 // Request types below are both the API's params (serde, schema) and the CLI's
 // arguments (clap): one definition, one doc comment for `--help` and schema.
 // `#[arg(skip)]` fields are filled in by hc itself.
@@ -213,6 +348,11 @@ pub struct RunParams {
     #[arg(skip)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size: Option<InitialSize>,
+    /// The caller's colors and cell size, answering the program's display queries
+    /// from its start. Omitted: Ghostty's defaults until a viewer attaches.
+    #[arg(skip)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display: Option<crate::viewers::Display>,
     /// Name, unique among live terminals: 1-32 of a-z 0-9 - _ .
     #[arg(long)]
     pub name: Option<String>,
@@ -502,6 +642,10 @@ pub struct WaitParams {
     /// yet counts as working). `any`: the parent's unseen news (a turn ended, it
     /// blocked, it hit an error, it exited), else the next child to stop working; for the parent
     /// itself, also a message typed into it while it worked (reason `message`).
+    /// A child with a sent launch task counts as working until its turn advances
+    /// past delivery, or it reports done, blocked, error, or exits. Startup idle
+    /// does not complete that task in either mode. Without a launch task, idle
+    /// still counts as stopped.
     #[arg(long)]
     pub children: Option<Children>,
     /// For programs, not agents: end when output printed after the wait started

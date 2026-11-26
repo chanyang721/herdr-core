@@ -45,10 +45,22 @@ hc wait helper
 hc send helper "Inspect x.rs only. No subagents. Report with hc send $HC_TERMINAL_ID when done or stuck."
 ```
 
+Template launches allow up to 60 seconds for readiness, retrying startup
+settle failures with the same safety rules as `send` (including its startup
+age limit). This covers slow startup without waiting forever on a dialog.
 Check `first_message.sent` in a launch with a task. If false, the task was
-NOT sent: `hc read <t>`; resolve readiness first (a trust dialog may need
+NOT sent; `hc get <t>` keeps `first_message: {sent: false, reason}` for later
+inspection, even after the core restarts. To recover: `hc read <t>`; resolve readiness first (a trust dialog may need
 `hc keys <t> down enter`), then send the task. Do not blindly resend after a
 failed send: it may still have arrived; read first.
+
+## Observe sends
+
+`hc events --json` includes `message_sent` after a successful send, before
+any `--wait` finishes. Its data contains `source` (null for a non-terminal
+caller), `target`, `at` (epoch milliseconds), and the send result's `started`.
+It contains no message text. This observes a send, not a read receipt or a
+promise that the recipient processed it; refused sends emit no such event.
 
 ## Talk, wait, and collect results
 
@@ -85,6 +97,13 @@ children finish:
 - `reason: message`: the message arrives as your next input, possibly late;
   it is not output to fetch with `hc read`. Process it and wait again if needed.
 - `reason: timeout` (default 180 seconds): a check-in, not failure; wait again.
+- A child with a sent launch task counts as working until its turn advances
+  past delivery, its root reports done, blocked, error after delivery, or it
+  exits. Startup words and child records do not complete that task in either
+  children mode. Without a launch task, startup idle still counts as stopped.
+  After a core crash, an unchanged final root word/turn cannot prove completion:
+  a repeated done, or done followed by idle while core was absent, may leave
+  the task pending until another root report or exit.
 - `not_started` from `send --wait`: it hasn't begun; read before deciding.
 - `hc wait <t>` waits for just that terminal. Plain programs have no agent
   status, so it normally waits for exit. `hc read <t>` gets output afterward.
@@ -112,7 +131,9 @@ error, exited); inspect its screen.
 API clients that already know a terminal's pane size can pass `size: {cols, rows}`
 to `terminal.run` (both positive). It applies before the program starts. Omit it
 for the unchanged configured headless size (default 200×120); later viewers
-still resize the terminal normally.
+still resize the terminal normally. `display: {fg, bg, cursor, cell}` (as in
+`terminal.attach`) likewise answers the program's color and cell-size queries
+from its start, before any viewer attaches.
 
 ```sh
 hc run cargo test                  # wait, stream output, return its exit code
@@ -211,10 +232,45 @@ paths start at your current folder. Prefer explicit paths for remote work.
   restarted event. Pending input/attach may be unavailable: retry after recovery.
 - Once work is accepted: `hc kill <t>`, then `hc rm <t>`. Only clean up
   terminals you started; `hc ls` includes your user's other live work.
+  A core configured with `close_guard = ["executable", "argument"]` requires
+  transactional authorization before termination or removal. `close-snapshot <t>`
+  reads native identity and input generation without authorizing a close.
+  API clients use `terminal.kill_batch` with complete `roots`, `expected`
+  identities and a durable `operation_id`; apply changes only after its exact
+  successful receipt. On an uncertain outcome, retain that plan and use
+  `terminal.close_reconcile` with the same operation, roots and expected set.
+  It sends no signals. A `no_signal:true` cancellation certificate permits retry
+  with the model preserved; unknown or partial outcomes remain held. There is
+  no single-kill fallback. See `docs/close-guard-protocol.md` for the protocol.
+  An exact original operation whose native journal proves `signalled:false` can
+  be reconciled to a cancellation even after a pre-READY timeout. A post-signal
+  `exit_unobserved` outcome remains held; it grants no cleanup permission.
+  Ordinary natural shell exits can be audited only with a native positive
+  shell-only history and actual Exit witness, independently checked by the helper.
 - `hc update` also restarts an older running core when the installed binary
   is already current. JSON reports `restarted: true`; terminals keep running.
   Managed installs must be updated with their package manager instead, and
   one in a folder you can't write (Unix) the way it was installed.
+- On macOS, privacy requests from terminal programs belong to Herdr Core,
+  not Herdr.app. Existing Herdr.app grants do not transfer to the core.
+- macOS installs keep the newest bundle at the fixed physical path
+  `~/.local/share/herdr-core/active/Herdr Core.app`, selected by a `current`
+  symlink, with `hc` and `herdr-core` links in
+  `~/.local/bin` (`HC_INSTALL_DIR` overrides the links'
+  folder). Updates keep running terminals. A bundled install's `update --from`
+  needs a complete signed `.app` (or its `Contents/MacOS/herdr-core`), not a bare
+  executable. Terminals created before this bundle
+  upgrade may still have broken macOS privacy access: recreate those terminals;
+  restarting only the core cannot repair their old holders. After an old updater
+  copies only the binary, run `hc update` to finish installing the bundle, even
+  if the version is already current. The app completes this during its update.
+  Startup never downloads updates. Previous bundles stay on disk while their
+  cores or holders run; later installs reclaim unused previous bundles.
+  Per-user installs use the bundle. Root/system destinations keep the independently
+  signed standalone executable and their existing macOS privacy behavior.
+  Machine installs also preserve bundles. A standalone sender cannot replace a
+  bundled remote core: run `hc update` there instead. Root remotes receive the
+  standalone release.
 - On macOS, desktop starts use a one-shot launchd job so quitting the launching
   app doesn't end terminals. SSH starts stay direct. If launchd fails, startup
   falls back to a direct child and logs the reason in `core.log`; that core may

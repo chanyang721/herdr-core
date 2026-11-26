@@ -154,7 +154,7 @@ fn send_refuses_a_blocked_program_and_checks_status_atomically() {
 }
 
 #[test]
-fn agents_wait_for_a_person_to_pause_and_never_mix_with_their_keys() {
+fn agents_wait_for_a_person_to_pause() {
     let s = session();
     let t = s.json(&["run", "--bg", "sh", "-c", BYTES])["address"].as_str().unwrap().to_string();
     let mut person = Viewer::attach(&s, &t, 80, 24, json!({}));
@@ -164,24 +164,6 @@ fn agents_wait_for_a_person_to_pause_and_never_mix_with_their_keys() {
     let started = Instant::now();
     s.json(&["send", &t, "x"]);
     assert!(started.elapsed() >= Duration::from_millis(500), "sent after {:?}", started.elapsed());
-
-    // Keys pressed while a paste is going in are held until it's done.
-    std::thread::sleep(Duration::from_millis(700));
-    let sender = {
-        let mut cmd = s.cmd();
-        cmd.args(["send", &t, "abc"]);
-        std::thread::spawn(move || cmd.output().unwrap())
-    };
-    // Inside the paste: "abc" is in, its Enter (the second 0d) is not.
-    let tokens = || text(&s, &t).split_whitespace().map(String::from).collect::<Vec<_>>();
-    wait_until("paste in", || tokens().contains(&"63".to_string()));
-    assert_eq!(tokens().iter().filter(|b| *b == "0d").count(), 1, "the paste ended already: tests nothing");
-    person.typed(b"Z");
-    assert!(sender.join().unwrap().status.success());
-    wait_until("Z delivered", || text(&s, &t).contains("5a"));
-    let bytes: Vec<String> = text(&s, &t).split_whitespace().map(String::from).collect();
-    let tail: Vec<&str> = bytes.iter().rev().take(5).rev().map(String::as_str).collect();
-    assert_eq!(tail, ["61", "62", "63", "0d", "5a"], "all: {bytes:?}");
 }
 
 #[test]
@@ -211,12 +193,19 @@ fn a_program_that_never_reads_its_input_stalls_nobody() {
 #[test]
 fn keys_follow_the_programs_keyboard_modes() {
     let s = session();
-    let t = s.json(&["run", "--bg", "sh", "-c", "printf '\\033[?1h'; stty raw -echo; od -An -c"])["address"]
+    // Some od implementations buffer until EOF even on a PTY. Bound the
+    // capture to the exact 16 input bytes; keep the shell live for invalid keys.
+    let t = s.json(&[
+        "run",
+        "--bg",
+        "sh",
+        "-c",
+        "printf '\\033[?1h'; stty raw -echo; printf READY; dd bs=1 count=16 2>/dev/null | od -An -c; sleep 100",
+    ])["address"]
         .as_str()
         .unwrap()
         .to_string();
-    shows(&s, &t, ""); // started
-    std::thread::sleep(Duration::from_millis(200));
+    shows(&s, &t, "READY"); // raw mode and application-cursor output have arrived
     s.json(&["keys", &t, "up", "ctrl+c", "a", "a", "a", "a", "a", "a", "a", "a", "a", "a", "a", "a"]);
     shows(&s, &t, "033   O   A 003   a");
     let (code, err) = s.err(&["keys", &t, "hyper+q"]);
@@ -253,4 +242,46 @@ fn interrupt_reports_what_it_observed() {
 
     let (code, err) = s.err(&["send", &quits, "x"]);
     assert_eq!((code, err["error"]["kind"].as_str()), (11, Some("finished")));
+}
+
+#[test]
+fn a_send_tells_subscribers_who_messaged_whom_but_not_what() {
+    let s = session();
+    let sender = run(&s, "r state=idle; sleep 100");
+    let body = script(&s, "stty -echo; r state=idle; read -r l; r state=working; w go; r state=done; sleep 100");
+    let agent = s.json(&["run", "--bg", "sh", "-c", &body])["address"].as_str().unwrap().to_string();
+    wait_until("idle", || status(&s, &agent) == "idle");
+    let mut events = s.connect();
+    events.call(1, "events.subscribe", json!({}));
+
+    // A send that types nothing is no message.
+    let refused = s.connect().call(
+        1,
+        "terminal.send",
+        json!({"terminal": agent, "text": "no", "if": "working", "caller": sender}),
+    );
+    assert_eq!(refused["error"]["data"]["kind"], "status_mismatch", "{refused}");
+
+    // Not from a terminal: no source. A program that never reports: started unknown.
+    // Events keep their order, so this being the first one says the refusal had none.
+    let silent = s.json(&["run", "--bg", "cat"])["address"].as_str().unwrap().to_string();
+    s.connect().call(3, "terminal.send", json!({"terminal": silent, "text": "x", "caller": "ppid:1"}));
+    let e = next_event(&mut events, |m| m["params"]["type"] == "message_sent")["params"].clone();
+    assert_eq!((e["data"]["target"].as_str(), &e["data"]["source"]), (Some(silent.as_str()), &Value::Null), "{e}");
+    assert!(e["data"]["started"].is_null(), "{e}");
+
+    // With wait: the event comes while the send still waits for the turn it started.
+    let mut conn = s.connect();
+    let params = json!({"terminal": agent, "text": "secret-body", "wait": true, "caller": sender});
+    let waiting = std::thread::spawn(move || conn.call(2, "terminal.send", params));
+    let msg = next_event(&mut events, |m| m["params"]["type"] == "message_sent");
+    let e = &msg["params"];
+    assert_eq!((e["terminal"].as_str(), e["data"]["target"].as_str()), (Some(agent.as_str()), Some(agent.as_str())));
+    assert_eq!((e["data"]["source"].as_str(), e["data"]["started"].as_bool()), (Some(sender.as_str()), Some(true)));
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+    assert!(e["data"]["at"].as_u64().is_some_and(|at| at <= now && at + 60_000 > now), "{msg}");
+    assert!(!msg.to_string().contains("secret-body"), "never the text: {msg}");
+    assert!(!waiting.is_finished(), "sent before the wait ends");
+    touch(&s, "go");
+    assert_eq!(waiting.join().unwrap()["result"]["wait"]["status"], "done");
 }

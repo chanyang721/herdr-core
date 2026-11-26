@@ -35,5 +35,6 @@ pub(super) async fn doc_set(core: Ctx<'_>, p: DocSetParams) -> Result<DocSetResu
         return Err(RpcError::internal(format!("cannot save document: {e}")));
     }
     core.doc_event(&mut st, json!({"name": p.name, "version": version}), None);
+    st.policy_generation = st.policy_generation.wrapping_add(1);
     Ok(DocSetResult { version })
 }
